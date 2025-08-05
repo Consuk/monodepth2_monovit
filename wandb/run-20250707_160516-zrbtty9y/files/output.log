@@ -1,0 +1,14 @@
+C:\Users\Trabajo\.conda\envs\monodepth2_env\lib\site-packages\torchvision\models\_utils.py:135: UserWarning: Using 'weights' as positional parameter(s) is deprecated since 0.13 and may be removed in the future. Please use keyword parameter(s) instead.
+  warnings.warn(
+C:\Users\Trabajo\.conda\envs\monodepth2_env\lib\site-packages\torchvision\models\_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=ResNet18_Weights.IMAGENET1K_V1`. You can also use `weights=ResNet18_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+Traceback (most recent call last):
+  File "train.py", line 17, in <module>
+    trainer = Trainer(opts)
+  File "C:\Users\Trabajo\Desktop\Monodepth2-master\trainer.py", line 90, in __init__
+    self.models["pose_encoder"] = networks.ResnetEncoder(
+  File "C:\Users\Trabajo\Desktop\Monodepth2-master\networks\resnet_encoder.py", line 80, in __init__
+    self.encoder = resnet_multiimage_input(num_layers, pretrained, num_input_images)
+  File "C:\Users\Trabajo\Desktop\Monodepth2-master\networks\resnet_encoder.py", line 55, in resnet_multiimage_input
+    loaded = model_zoo.load_url(models.resnet.model_urls['resnet{}'.format(num_layers)])
+AttributeError: module 'torchvision.models.resnet' has no attribute 'model_urls'

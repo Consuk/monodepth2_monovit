@@ -1,0 +1,17 @@
+{"time":"2025-07-07T16:09:44.1861004-06:00","level":"INFO","msg":"stream: starting","core version":"0.21.0"}
+{"time":"2025-07-07T16:09:44.2898102-06:00","level":"INFO","msg":"stream: created new stream","id":"54qrkq93"}
+{"time":"2025-07-07T16:09:44.2903514-06:00","level":"INFO","msg":"stream: started","id":"54qrkq93"}
+{"time":"2025-07-07T16:09:44.2903514-06:00","level":"INFO","msg":"sender: started","stream_id":"54qrkq93"}
+{"time":"2025-07-07T16:09:44.2903514-06:00","level":"INFO","msg":"writer: Do: started","stream_id":"54qrkq93"}
+{"time":"2025-07-07T16:09:44.2903514-06:00","level":"INFO","msg":"handler: started","stream_id":"54qrkq93"}
+{"time":"2025-07-07T16:09:59.4498086-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:14.44988-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:29.4499763-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:44.4497645-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:59.4496358-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:14.4495471-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:29.4499259-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:44.4498624-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:59.4496087-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:12:14.4495204-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:12:29.4496578-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}

@@ -1,0 +1,27 @@
+{"time":"2025-07-07T16:07:11.9670904-06:00","level":"INFO","msg":"stream: starting","core version":"0.21.0"}
+{"time":"2025-07-07T16:07:12.0711981-06:00","level":"INFO","msg":"stream: created new stream","id":"r0s5cn58"}
+{"time":"2025-07-07T16:07:12.0711981-06:00","level":"INFO","msg":"stream: started","id":"r0s5cn58"}
+{"time":"2025-07-07T16:07:12.0711981-06:00","level":"INFO","msg":"writer: Do: started","stream_id":"r0s5cn58"}
+{"time":"2025-07-07T16:07:12.0711981-06:00","level":"INFO","msg":"handler: started","stream_id":"r0s5cn58"}
+{"time":"2025-07-07T16:07:12.0711981-06:00","level":"INFO","msg":"sender: started","stream_id":"r0s5cn58"}
+{"time":"2025-07-07T16:07:27.2802579-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:07:42.2843115-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:07:57.2810936-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:08:12.2830261-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:08:27.281737-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:08:42.28018-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:08:57.2823687-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:09:12.2870074-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:09:27.2857175-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:09:42.2809823-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:09:57.2625601-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:12.262425-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:27.2628781-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:42.2624807-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:57.2628496-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:12.2629528-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:27.2629093-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:42.2627533-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:57.2626206-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:12:12.2624369-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:12:27.2625615-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
