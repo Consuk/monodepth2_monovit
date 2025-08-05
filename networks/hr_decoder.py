@@ -109,6 +109,8 @@ class DepthDecoderT(nn.Module):
 
             # add fSE block to decoder
             if index in self.attention_position:
+                print(f"Trying to access features['X_{row+1}{col-1}']")
+                print(features.keys())
                 features["X_"+index] = self.convs["X_" + index + "_attention"](
                     self.convs["X_{}{}_Conv_0".format(row+1, col-1)](features["X_{}{}".format(row+1, col-1)]), low_features)
             elif index in self.non_attention_position:
