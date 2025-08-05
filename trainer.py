@@ -285,6 +285,7 @@ class Trainer:
         if self.use_pose_net:
             outputs.update(self.predict_poses(inputs, features))
 
+        print("color mean:", inputs[("color", 0, 0)].mean().item())
         self.generate_images_pred(inputs, outputs)
         losses = self.compute_losses(inputs, outputs)
 
