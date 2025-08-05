@@ -89,6 +89,7 @@ class DepthDecoderT(nn.Module):
         feat={}
         #print(len(input_features))
         #print(input_features[4].shape)
+        print("input_features[4]:", input_features[4])
         feat[4] = self.convs["f4"](input_features[4])
         feat[3] = self.convs["f3"](input_features[3])
         feat[2] = self.convs["f2"](input_features[2])
