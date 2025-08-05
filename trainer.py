@@ -59,16 +59,16 @@ class Trainer:
         self.models["encoder"].to(self.device)"""
 
         #MonoViT
-        self.models["encoder"] = networks.mpvit_small()            
-        self.models["encoder"].num_ch_enc = [64,64,128,216,288]
-        self.models["encoder"].to(self.device)
+        # self.models["encoder"] = networks.mpvit_small()            
+        # self.models["encoder"].num_ch_enc = [64,64,128,216,288]
+        # self.models["encoder"].to(self.device)
 
         # Resnet de momento
-        # self.models["encoder"] = networks.ResnetEncoder(
-        #     self.opt.num_layers,
-        #     self.opt.weights_init == "pretrained"
-        # )
-        # self.models["encoder"].to(self.device)
+        self.models["encoder"] = networks.ResnetEncoder(
+            self.opt.num_layers,
+            self.opt.weights_init == "pretrained"
+        )
+        self.models["encoder"].to(self.device)
 
 
         self.parameters_to_train += list(self.models["encoder"].parameters())
