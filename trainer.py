@@ -274,6 +274,7 @@ class Trainer:
                 features[k] = [f[i] for f in all_features]
 
             outputs = self.models["depth"](features[0])
+            
         else:
             # Otherwise, we only feed the image with frame_id 0 through the depth encoder
             features = self.models["encoder"](inputs["color_aug", 0, 0])
@@ -285,7 +286,6 @@ class Trainer:
         if self.use_pose_net:
             outputs.update(self.predict_poses(inputs, features))
 
-        print("color mean:", inputs[("color", 0, 0)].mean().item())
         self.generate_images_pred(inputs, outputs)
         losses = self.compute_losses(inputs, outputs)
 
