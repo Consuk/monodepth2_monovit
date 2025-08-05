@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from torchvision.models import ResNet18_Weights, ResNet50_Weights
 
 
 class ResNetMultiImageInput(models.ResNet):
@@ -40,9 +39,10 @@ def resnet_multiimage_input(num_layers, pretrained=False, num_input_images=1):
     if pretrained:
         # Load standard pretrained weights
         if num_layers == 18:
-            weights = ResNet18_Weights.IMAGENET1K_V1.get_state_dict(progress=True)
+            weights = models.resnet18(pretrained=True).state_dict()
         elif num_layers == 50:
-            weights = ResNet50_Weights.IMAGENET1K_V1.get_state_dict(progress=True)
+            weights = models.resnet50(pretrained=True).state_dict()
+
 
         # Adapt conv1 weights to multiple input images
         conv1_weight = weights['conv1.weight']
@@ -73,13 +73,8 @@ class ResnetEncoder(nn.Module):
         if num_input_images > 1:
             self.encoder = resnet_multiimage_input(num_layers, pretrained, num_input_images)
         else:
-            if pretrained:
-                if num_layers == 18:
-                    self.encoder = resnets[num_layers](weights=ResNet18_Weights.IMAGENET1K_V1)
-                elif num_layers == 50:
-                    self.encoder = resnets[num_layers](weights=ResNet50_Weights.IMAGENET1K_V1)
-            else:
-                self.encoder = resnets[num_layers](weights=None)
+            self.encoder = resnets[num_layers](pretrained=pretrained)
+
 
         if num_layers > 34:
             self.num_ch_enc[1:] *= 4
