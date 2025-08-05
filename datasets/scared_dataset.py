@@ -72,10 +72,8 @@ class SCAREDDataset(MonoDataset):
 
         folder = line[0]
 
-        if len(line) == 3:
-            frame_index = line[1]
-        else:
-            frame_index = 0
+        frame_index = int(line[1]) if len(line) == 3 else 0
+
 
         if len(line) == 3:
             side = line[2]
