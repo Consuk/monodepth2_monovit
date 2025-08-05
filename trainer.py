@@ -78,9 +78,15 @@ class Trainer:
             self.models["encoder"].num_ch_enc, self.opt.scales)
         self.models["depth"].to(self.device)"""
         #MonoViT
-        self.models["depth"] = networks.DepthDecoderT()
-        self.models["depth"].to(self.device)
+        # self.models["depth"] = networks.DepthDecoderT()
+        # self.models["depth"].to(self.device)
 
+        # self.parameters_to_train += list(self.models["depth"].parameters())
+        self.models["depth"] = networks.DepthDecoder(
+            self.models["encoder"].num_ch_enc,
+            self.opt.scales
+        )
+        self.models["depth"].to(self.device)
         self.parameters_to_train += list(self.models["depth"].parameters())
 
         if self.use_pose_net:
