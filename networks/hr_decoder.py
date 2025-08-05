@@ -8,8 +8,8 @@ from .hr_layers import *
 
 
 class DepthDecoderT(nn.Module):
-    #def __init__(self, ch_enc, scales=range(4),num_ch_enc = [ 64, 64, 128, 256, 512 ], num_output_channels=1):
-    def __init__(self, ch_enc = [64,128,216,288,288], scales=range(4),num_ch_enc = [ 64, 64, 128, 256, 512 ], num_output_channels=1):
+    def __init__(self, ch_enc, scales=range(4),num_ch_enc = [ 64, 64, 128, 256, 512 ], num_output_channels=1):
+    # def __init__(self, ch_enc = [64,128,216,288,288], scales=range(4),num_ch_enc = [ 64, 64, 128, 256, 512 ], num_output_channels=1):
         super(DepthDecoderT, self).__init__()
         self.num_output_channels = num_output_channels
         self.num_ch_enc = num_ch_enc
