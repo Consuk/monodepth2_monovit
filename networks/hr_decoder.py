@@ -9,7 +9,7 @@ from .hr_layers import *
 
 class DepthDecoderT(nn.Module):
     # def __init__(self, ch_enc, scales=range(4),num_ch_enc = [ 64, 64, 128, 256, 512 ], num_output_channels=1):
-    def __init__(self, ch_enc = [ 64, 64, 128, 256, 512 ], scales=range(4),num_ch_enc = [ 64, 64, 128, 256, 512 ], num_output_channels=1):
+    def __init__(self, ch_enc = [64, 128, 216, 288, 288], scales=range(4),num_ch_enc = [ 64, 64, 128, 256, 512 ], num_output_channels=1):
         super(DepthDecoderT, self).__init__()
         self.num_output_channels = num_output_channels
         self.num_ch_enc = num_ch_enc
@@ -112,6 +112,8 @@ class DepthDecoderT(nn.Module):
             if index in self.attention_position:
                 print(f"Trying to access features['X_{row+1}{col-1}']")
                 print(features.keys())
+                print(f"Passing through X_{row+1}{col-1}_Conv_0 with input shape:",
+                    None if features.get(f"X_{row+1}{col-1}") is None else features[f"X_{row+1}{col-1}"].shape)
                 features["X_"+index] = self.convs["X_" + index + "_attention"](
                     self.convs["X_{}{}_Conv_0".format(row+1, col-1)](features["X_{}{}".format(row+1, col-1)]), low_features)
             elif index in self.non_attention_position:
