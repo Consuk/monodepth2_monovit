@@ -1,0 +1,11 @@
+Training model named:
+   mdp
+Models and tensorboard events files are saved to:
+   C:\Users\Trabajo\tmp
+Training is using:
+   cuda
+Using split:
+   eigen_zhou
+There are 39810 training items and 4424 validation items
+
+Training

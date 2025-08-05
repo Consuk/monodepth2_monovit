@@ -1,0 +1,17 @@
+{"time":"2025-07-07T16:09:33.0178288-06:00","level":"INFO","msg":"stream: starting","core version":"0.21.0"}
+{"time":"2025-07-07T16:09:33.1173105-06:00","level":"INFO","msg":"stream: created new stream","id":"jsby3bkc"}
+{"time":"2025-07-07T16:09:33.1173105-06:00","level":"INFO","msg":"stream: started","id":"jsby3bkc"}
+{"time":"2025-07-07T16:09:33.1173105-06:00","level":"INFO","msg":"writer: Do: started","stream_id":"jsby3bkc"}
+{"time":"2025-07-07T16:09:33.1173105-06:00","level":"INFO","msg":"sender: started","stream_id":"jsby3bkc"}
+{"time":"2025-07-07T16:09:33.1173105-06:00","level":"INFO","msg":"handler: started","stream_id":"jsby3bkc"}
+{"time":"2025-07-07T16:09:48.3078789-06:00","level":"ERROR","msg":"monitor: error sampling metrics: Incorrect function."}
+{"time":"2025-07-07T16:10:03.2867108-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:18.2869242-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:33.2867377-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:10:48.2869458-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:03.2869201-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:18.2872001-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:33.2866578-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:11:48.2866143-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:12:03.2869991-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}
+{"time":"2025-07-07T16:12:18.2866954-06:00","level":"ERROR","msg":"monitor: error sampling metrics: process does not exist"}

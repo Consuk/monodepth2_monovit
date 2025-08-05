@@ -1,0 +1,34 @@
+{
+  "os": "Windows-10-10.0.26100-SP0",
+  "python": "CPython 3.8.20",
+  "startedAt": "2025-07-07T22:06:59.782791Z",
+  "program": "<python with no main file>",
+  "email": "0228053@up.edu.mx",
+  "root": "C:\\Users\\Trabajo\\Desktop\\Monodepth2-master",
+  "host": "Consuk",
+  "executable": "C:\\Users\\Trabajo\\.conda\\envs\\monodepth2_env\\python.exe",
+  "cpu_count": 8,
+  "cpu_count_logical": 16,
+  "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "1023121813504",
+      "used": "386927972352"
+    }
+  },
+  "memory": {
+    "total": "16312721408"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+      "memoryTotal": "4294967296",
+      "cudaCores": 2560,
+      "architecture": "Ampere",
+      "uuid": "GPU-fceba30d-841d-f6dd-51bb-f6fdcdb9e823"
+    }
+  ],
+  "cudaVersion": "12.6",
+  "writerId": "szuenkenwjzdx6kaz3lcz9pg6065hy4m"
+}
