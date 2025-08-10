@@ -61,7 +61,7 @@ class Trainer:
 
         #MonoViT
         self.models["encoder"] = networks.mpvit_small()            
-        self.models["encoder"].num_ch_enc = [64,64,128,216,288]
+        self.models["encoder"].num_ch_enc = [64, 128, 216, 288, 288]
         self.models["encoder"].to(self.device)
 
 
@@ -272,6 +272,10 @@ class Trainer:
         else:
             # Otherwise, we only feed the image with frame_id 0 through the depth encoder
             features = self.models["encoder"](inputs["color_aug", 0, 0])
+            if not hasattr(self, "_printed_shapes"):
+                print(">>> Encoder feature shapes:", [tuple(f.shape) for f in features])
+                self._printed_shapes = True
+
             outputs = self.models["depth"](features)
 
         if self.opt.predictive_mask:
