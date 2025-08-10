@@ -822,7 +822,7 @@ def mpvit_small(**kwargs):
         num_heads=[8, 8, 8, 8],
         **kwargs,
     )
-    checkpoint = torch.load('/workspace/endo-manydepth/manydepth/mpvit/mpvit_small.pth', map_location=lambda storage, loc: storage)['model']
+    # checkpoint = torch.load('/workspace/endo-manydepth/manydepth/mpvit/mpvit_small.pth', map_location=lambda storage, loc: storage)['model']
     logger = logging.getLogger()
     
     
