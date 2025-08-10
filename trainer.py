@@ -60,12 +60,8 @@ class Trainer:
         self.models["encoder"].to(self.device)"""
 
         #MonoViT
-        # self.models["encoder"] = networks.mpvit_small()            
-        # self.models["encoder"].num_ch_enc = [64,64,128,216,288]
-        # self.models["encoder"].to(self.device)
-
-        # Monovit
-        self.models["encoder"] = mpvit_small()
+        self.models["encoder"] = networks.mpvit_small()            
+        self.models["encoder"].num_ch_enc = [64,64,128,216,288]
         self.models["encoder"].to(self.device)
 
 

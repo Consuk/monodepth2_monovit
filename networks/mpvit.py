@@ -25,8 +25,22 @@ from functools import partial
 from torch import nn, einsum
 from torch.nn.modules.batchnorm import _BatchNorm
 #from mmcv.utils import load_checkpoint,load_state_dict
-from mmengine.runner.checkpoint import load_checkpoint,load_state_dict
-from mmcv.cnn import build_norm_layer
+try:
+    from mmengine.runner.checkpoint import load_checkpoint, load_state_dict
+except Exception:
+    load_checkpoint = None
+    def load_state_dict(*args, **kwargs):
+        # fallback dummy: no hace nada si no se usan pesos preentrenados
+        return
+
+try:
+    from mmcv.cnn import build_norm_layer
+except Exception:
+    import torch.nn as nn
+    def build_norm_layer(cfg, out_ch):
+        # fallback simple si no hay mmcv: BN2d por defecto
+        return 'bn', nn.BatchNorm2d(out_ch)
+
 
 #from mmseg.utils import get_root_logger
 #from mmseg.utils import get_root_logger
@@ -774,16 +788,10 @@ def mpvit_tiny(**kwargs):
 
 def mpvit_xsmall(**kwargs):
     """mpvit_xsmall :
-
-    - #paths : [2, 3, 3, 3]
-    - #layers : [1, 2, 4, 1]
-    - #channels : [64, 128, 192, 256]
-    - MLP_ratio : 4
-    Number of params : 10573448
-    FLOPs : 2971396560
-    Activations : 21983464
+    - paths: [2, 3, 3, 3]
+    - layers: [1, 2, 4, 1]
+    - channels: [64, 128, 192, 256]
     """
-
     model = MPViT(
         num_stages=4,
         num_path=[2, 3, 3, 3],
@@ -793,26 +801,17 @@ def mpvit_xsmall(**kwargs):
         num_heads=[8, 8, 8, 8],
         **kwargs,
     )
-    # checkpoint = torch.load('/workspace/endo-manydepth/manydepth/mpvit/mpvit_xsmall.pth', map_location=lambda storage, loc: storage)['model']
-    load_state_dict(model, checkpoint, strict=False, logger=logger)
-    del checkpoint
-    del logger
+    print("[MPViT-xsmall] Using random init (no pretrained).")
     model.default_cfg = _cfg_mpvit()
     return model
 
 
 def mpvit_small(**kwargs):
     """mpvit_small :
-
-    - #paths : [2, 3, 3, 3]
-    - #layers : [1, 3, 6, 3]
-    - #channels : [64, 128, 216, 288]
-    - MLP_ratio : 4
-    Number of params : 22892400
-    FLOPs : 4799650824
-    Activations : 30601880
+    - paths: [2, 3, 3, 3]
+    - layers: [1, 3, 6, 3]
+    - channels: [64, 128, 216, 288]
     """
-
     model = MPViT(
         num_stages=4,
         num_path=[2, 3, 3, 3],
@@ -822,15 +821,11 @@ def mpvit_small(**kwargs):
         num_heads=[8, 8, 8, 8],
         **kwargs,
     )
-    # checkpoint = torch.load('/workspace/endo-manydepth/manydepth/mpvit/mpvit_small.pth', map_location=lambda storage, loc: storage)['model']
-    logger = logging.getLogger()
-    
-    
-    load_state_dict(model, checkpoint, strict=False, logger=logger)
-    del checkpoint
-    del logger
+    # Entrenamos desde cero (init aleatoria)
+    print("[MPViT-small] Using random init (no pretrained).")
     model.default_cfg = _cfg_mpvit()
     return model
+
 
 
 def mpvit_base(**kwargs):
