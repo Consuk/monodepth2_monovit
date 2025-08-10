@@ -675,7 +675,7 @@ class MPViT(nn.Module):
                 Patch_Embed_stage(
                     embed_dims[idx],
                     num_path=num_path[idx],
-                    isPool= True,
+                    isPool=(idx != 0),               # <- el stage 0 NO baja resolución
                     norm_cfg=self.conv_norm_cfg,
                 )
                 for idx in range(self.num_stages)
