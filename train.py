@@ -15,7 +15,7 @@ opts = options.parse()
 
 if __name__ == "__main__":
     import wandb
-    wandb.init(project="Monodepth2")
+    wandb.init(project="Monodepth2_monovit")
     trainer = Trainer(opts)
     trainer.train()
 

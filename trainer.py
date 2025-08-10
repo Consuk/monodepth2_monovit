@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 import json
 
+from networks.mpvit import mpvit_small
 from utils import *
 from kitti_utils import *
 from layers import *
@@ -63,11 +64,8 @@ class Trainer:
         # self.models["encoder"].num_ch_enc = [64,64,128,216,288]
         # self.models["encoder"].to(self.device)
 
-        # Resnet de momento
-        self.models["encoder"] = networks.ResnetEncoder(
-            self.opt.num_layers,
-            self.opt.weights_init == "pretrained"
-        )
+        # Monovit
+        self.models["encoder"] = mpvit_small()
         self.models["encoder"].to(self.device)
 
 

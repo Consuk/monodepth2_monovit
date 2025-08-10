@@ -24,7 +24,7 @@ class DepthDecoder(nn.Module):
         self.scales = scales
 
         self.num_ch_enc = num_ch_enc
-        self.num_ch_dec = np.array([16, 32, 64, 128, 256])
+        self.num_ch_dec = np.array([64, 128, 216, 288, 288])
 
         # decoder
         self.convs = OrderedDict()
