@@ -252,12 +252,8 @@ class Patch_Embed_stage(nn.Module):
         # scale
 
     def forward(self, x):
-        att_inputs = []
-        for pe in self.patch_embeds:
-            x = pe(x)
-            att_inputs.append(x)
+        return [pe(x) for pe in self.patch_embeds]  # cada path desde el mismo x
 
-        return att_inputs
 
 
 class ConvPosEnc(nn.Module):

@@ -12,11 +12,11 @@ from .mono_dataset import MonoDataset
 class SCAREDDataset(MonoDataset):
     def __init__(self, *args, **kwargs):
         super(SCAREDDataset, self).__init__(*args, **kwargs)
-        #SCARED Dataset
-        self.K = np.array([[0.82, 0, 0.5, 0],
-                           [0, 1.02, 0.5, 0],
-                           [0, 0, 1, 0],
-                           [0, 0, 0, 1]], dtype=np.float32)
+        # #SCARED Dataset
+        # self.K = np.array([[0.82, 0, 0.5, 0],
+        #                    [0, 1.02, 0.5, 0],
+        #                    [0, 0, 1, 0],
+        #                    [0, 0, 0, 1]], dtype=np.float32)
                 
         #256 / 320
         #fx769.807403688120 fy769.720558534159 cx675.226397736271 cy548.903474592445 k1-0.454260397098776 k20.179156666748519 k3-0.0285017743214105 p1-0.00134889190333418 p20.000738912923806121 skew-0.141152521412316
@@ -29,10 +29,10 @@ class SCAREDDataset(MonoDataset):
         #fx = 155.00297855750486 fy= 165.3365104613385 cx = 160.0; cy = 128.0;
         #fy = 176.358213824 cy =  136.533333333
         #fx = 154.63, fy = 154.74, cx = 160,cy = 128
-        """self.K = np.array([[0.48321875, 0, 0.5, 0],
+        self.K = np.array([[0.48321875, 0, 0.5, 0],
                            [0, 0.4835625,0.5, 0],
                            [0, 0, 1, 0],
-                           [0, 0, 0, 1]], dtype=np.float32)"""
+                           [0, 0, 0, 1]], dtype=np.float32)
         
                                    
         #Colon10k dataset
