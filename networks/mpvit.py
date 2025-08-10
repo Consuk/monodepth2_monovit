@@ -649,25 +649,20 @@ class MPViT(nn.Module):
         dpr = dpr_generator(drop_path_rate, num_layers, num_stages)
 
         self.stem = nn.Sequential(
-            Conv2d_BN(
-                in_chans,
-                embed_dims[0] // 2,
-                kernel_size=3,
-                stride=2,
-                pad=1,
-                act_layer=nn.Hardswish,
-                norm_cfg=self.conv_norm_cfg,
-            ),
-            Conv2d_BN(
-                embed_dims[0] // 2,
-                embed_dims[0],
-                kernel_size=3,
-                stride=2,
-                pad=1,
-                act_layer=nn.Hardswish,
-                norm_cfg=self.conv_norm_cfg,
-            ),
+            Conv2d_BN(in_chans, embed_dims[0] // 2, 
+                      kernel_size=3, 
+                      stride=2, 
+                      pad=1,
+                    act_layer=nn.Hardswish, 
+                    norm_cfg=self.conv_norm_cfg),  # -> 1/2
+            Conv2d_BN(embed_dims[0] // 2, embed_dims[0], 
+                      kernel_size=3, 
+                      stride=1, 
+                      pad=1,
+                    act_layer=nn.Hardswish, 
+                    norm_cfg=self.conv_norm_cfg),  # -> se queda en 1/2
         )
+
 
         # Patch embeddings.
         self.patch_embed_stages = nn.ModuleList(
@@ -675,7 +670,7 @@ class MPViT(nn.Module):
                 Patch_Embed_stage(
                     embed_dims[idx],
                     num_path=num_path[idx],
-                    isPool=(idx != 0),               # <- el stage 0 NO baja resolución
+                    isPool=True,               # <- el stage 0 NO baja resolución
                     norm_cfg=self.conv_norm_cfg,
                 )
                 for idx in range(self.num_stages)
