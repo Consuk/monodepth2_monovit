@@ -662,7 +662,7 @@ class MPViT(nn.Module):
                 embed_dims[0] // 2,
                 embed_dims[0],
                 kernel_size=3,
-                stride=1,
+                stride=2,
                 pad=1,
                 act_layer=nn.Hardswish,
                 norm_cfg=self.conv_norm_cfg,
