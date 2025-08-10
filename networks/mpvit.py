@@ -241,7 +241,7 @@ class Patch_Embed_stage(nn.Module):
                     in_chans=embed_dim,
                     embed_dim=embed_dim,
                     patch_size=3,
-                    stride=2 if isPool and idx == 0 else 1,
+                    stride = 2 if isPool else 1,
                     pad=1,
                     norm_cfg=norm_cfg,
                 )
