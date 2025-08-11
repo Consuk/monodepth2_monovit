@@ -568,29 +568,42 @@ class Trainer:
                                   sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)))
 
     def log(self, mode, inputs, outputs, losses):
-        """Write an event to the tensorboard events file
         """
-        #writer = self.writers[mode]
-        for l, v in losses.items():
-            wandb.log({mode+"{}".format(l):v},step =self.step)
+        mode: "train/" o "val/" (incluye la barra final para prefijar bien)
+        """
+        # --- 1) pérdidas en un solo dict ---
+        log_data = {f"{mode}{k}": v for k, v in losses.items()}
 
-        for j in range(min(4, self.opt.batch_size)):  # write a maxmimum of four images
-            s = 0  # log only max scale
-            for frame_id in self.opt.frame_ids:
+        # --- 2) elegir un índice del batch que rote con el step ---
+        s = 0  # solo escala máxima
+        B = inputs[("color", 0, s)].shape[0]
+        # rota cada 'log_frequency' pasos; si B<4 no pasa nada
+        viz_idx = (self.step // max(1, self.opt.log_frequency)) % B
 
-                wandb.log({ "color_{}_{}/{}".format(frame_id, s, j): wandb.Image(inputs[("color", frame_id, s)][j].data)},step=self.step)
-                
-                if s == 0 and frame_id != 0:
-                    wandb.log({"color_pred_{}_{}/{}".format(frame_id, s, j): wandb.Image(outputs[("color", frame_id, s)][j].data)},step=self.step)
-                    #wandb.log({"color_pred_refined_{}_{}/{}".format(frame_id, s, j): wandb.Image(outputs[("color_refined", frame_id,s)][j].data)},step=self.step)
-                    #wandb.log({"contrast_{}_{}/{}".format(frame_id, s, j): wandb.Image(outputs[("ch",s, frame_id)][j].data)},step=self.step)
-                    #wandb.log({"brightness_{}_{}/{}".format(frame_id, s, j): wandb.Image(outputs[("bh",s, frame_id)][j].data)},step=self.step)
-            disp = self.colormap(outputs[("disp", s)][j, 0])
-            wandb.log({"disp_multi_{}/{}".format(s, j): wandb.Image(disp.transpose(1, 2, 0))},step=self.step)
-            """f = outputs["mf_"+str(s)+"_"+str(frame_id)][j].data
-            flow = self.flow2rgb(f,32)
-            flow = torch.from_numpy(flow)
-            wandb.log({"motion_flow_{}_{}".format(s,j): wandb.Image(flow)},step=self.step)"""
+        # --- 3) imágenes: target/vecinos y reconstrucciones ---
+        # target (frame_id=0)
+        img0 = inputs[("color", 0, s)][viz_idx].detach().cpu()
+        log_data[f"{mode}color/0_{s}"] = wandb.Image(img0)
+
+        # vecinos y sus reproyecciones
+        for frame_id in self.opt.frame_ids:
+            if frame_id == 0:
+                continue
+            img_src = inputs[("color", frame_id, s)][viz_idx].detach().cpu()
+            log_data[f"{mode}color/{frame_id}_{s}"] = wandb.Image(img_src)
+
+            if ("color", frame_id, s) in outputs:
+                img_pred = outputs[("color", frame_id, s)][viz_idx].detach().cpu()
+                log_data[f"{mode}color_pred/{frame_id}_{s}"] = wandb.Image(img_pred)
+
+        # --- 4) disparidad a color ---
+        disp = outputs[("disp", s)][viz_idx, 0].detach().cpu().numpy()
+        disp_rgb = self.colormap(disp).transpose(1, 2, 0)  # HWC
+        log_data[f"{mode}disp/{s}"] = wandb.Image(disp_rgb)
+
+        # --- 5) un solo log por step ---
+        wandb.log(log_data, step=self.step)
+
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with
