@@ -18,7 +18,8 @@ from utils import *
 import matplotlib.pyplot as plt
 
 import wandb
-from networks.mpvit import MPViTEncoder
+from networks.mpvit import mpvit_small
+
 
 
 wandb.init(project="iilDepth-Testing")
@@ -116,8 +117,7 @@ def evaluate(opt):
                                 pin_memory=True, drop_last=False)
 
         encoder = networks.ResnetEncoder(opt.num_layers, False)
-        encoder = MPViTEncoder("small")   # o el encoder que realmente usaste
-
+        encoder = networks.mpvit_small()   # o el encoder que realmente usaste
         depth_decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=range(4))
 
         #encoder2 = networks.ResnetEncoder(opt.num_layers, False)
