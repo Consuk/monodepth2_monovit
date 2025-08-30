@@ -116,8 +116,9 @@ def evaluate(opt):
         dataloader = DataLoader(dataset, 16, shuffle=False, num_workers=opt.num_workers,
                                 pin_memory=True, drop_last=False)
 
-        encoder = networks.ResnetEncoder(opt.num_layers, False)
-        encoder = networks.mpvit_small()   # o el encoder que realmente usaste
+        # encoder = networks.ResnetEncoder(opt.num_layers, False)
+        encoder = mpvit_small()
+        encoder.num_ch_enc = [64, 128, 216, 288, 288]
         depth_decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=range(4))
 
         #encoder2 = networks.ResnetEncoder(opt.num_layers, False)
