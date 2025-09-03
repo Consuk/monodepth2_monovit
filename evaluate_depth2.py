@@ -7,7 +7,9 @@ import torch.nn.functional as F
 import cv2
 
 from options import MonodepthOptions
-from networks import ResnetEncoder, DepthDecoder
+
+import argparse
+import networks
 
 def readlines(p):
     with open(p, "r") as f:
@@ -38,23 +40,17 @@ def compute_depth_errors(gt, pred):
     a3 = (thresh < 1.25**3 ).mean()
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
 
-import argparse
-import networks
+
 
 def load_model(opt, device, encoder_type="resnet"):
     if encoder_type == "monovit":
-        # === MonoViT ===
         encoder = networks.mpvit_small()
-        # Asegura los canales para el decoder: como en tu trainer.py
-        encoder.num_ch_enc = [64, 64, 128, 216, 288]
-        # Usa el decoder de MonoViT si existe en tu repo
+        encoder.num_ch_enc = [64, 64, 128, 216, 288]  # como en tu trainer.py
         if hasattr(networks, "DepthDecoderT"):
             decoder = networks.DepthDecoderT()
         else:
-            # fallback: si tu implementación usa el decoder normal pero compatible
             decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=opt.scales)
     else:
-        # === ResNet (Monodepth2 clásico) ===
         encoder = networks.ResnetEncoder(opt.num_layers, opt.weights_init == "pretrained")
         decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=opt.scales)
 
@@ -63,28 +59,31 @@ def load_model(opt, device, encoder_type="resnet"):
     enc_dict = torch.load(enc_path, map_location=device)
     dec_dict = torch.load(dec_path, map_location=device)
 
-    # Para mantener compatibilidad con tus pesos guardados:
+    # quitar prefijo 'module.' si existe
+    enc_dict = {k.replace("module.", ""): v for k, v in enc_dict.items()}
+    dec_dict = {k.replace("module.", ""): v for k, v in dec_dict.items()}
+
     feed_h = enc_dict.get("height", opt.height)
     feed_w = enc_dict.get("width",  opt.width)
 
-    # Carga “por intersección” de claves
-    model_enc_dict = encoder.state_dict()
-    enc_dict = {k: v for k, v in enc_dict.items() if k in model_enc_dict}
-    missing = set(model_enc_dict.keys()) - set(enc_dict.keys())
-    if len(enc_dict) == 0:
-        raise RuntimeError("No se pudo mapear ninguna clave del encoder.pth al encoder actual. "
-                           "¿Seguro que --encoder_type coincide con los pesos?")
-    model_enc_dict.update(enc_dict)
-    encoder.load_state_dict(model_enc_dict, strict=False)
+    # carga por intersección
+    enc_state = encoder.state_dict()
+    enc_subset = {k: v for k, v in enc_dict.items() if k in enc_state}
+    if not enc_subset:
+        raise RuntimeError("Ninguna clave del encoder.pth matchea el encoder actual. "
+                           "Verifica --encoder_type contra tus pesos.")
+    enc_state.update(enc_subset)
+    encoder.load_state_dict(enc_state, strict=False)
 
-    model_dec_dict = decoder.state_dict()
-    dec_dict = {k: v for k, v in dec_dict.items() if k in model_dec_dict}
-    model_dec_dict.update(dec_dict)
-    decoder.load_state_dict(model_dec_dict, strict=False)
+    dec_state = decoder.state_dict()
+    dec_subset = {k: v for k, v in dec_dict.items() if k in dec_state}
+    dec_state.update(dec_subset)
+    decoder.load_state_dict(dec_state, strict=False)
 
     encoder.to(device).eval()
     decoder.to(device).eval()
     return encoder, decoder, feed_h, feed_w
+
 
 def load_gt_npz(npz_path):
     npz = np.load(npz_path, allow_pickle=True)
@@ -102,11 +101,17 @@ def load_gt_npz(npz_path):
 
 def main():
     # Extra flags (no rompen options.py)
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--encoder_type", type=str, default="resnet",
-                        choices=["resnet", "monovit"],
-                        help="Tipo de encoder: resnet (Monodepth2) o monovit")
-    extra, _ = parser.parse_known_args()
+    # --- parser previo SOLO para flags extra que no existen en options.py ---
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--encoder_type",
+        choices=["resnet", "monovit"],
+        default="resnet",   # pon "monovit" si quieres que sea el default en este script
+        help="Tipo de encoder a usar con los pesos cargados"
+    )
+    pre_args, _ = pre_parser.parse_known_args()
+    # -----------------------------------------------------------------------
+
 
     options = MonodepthOptions()
     opt = options.parse()
