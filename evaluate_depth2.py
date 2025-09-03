@@ -38,24 +38,53 @@ def compute_depth_errors(gt, pred):
     a3 = (thresh < 1.25**3 ).mean()
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
 
-def load_model(opt, device):
-    enc = ResnetEncoder(opt.num_layers, opt.weights_init == "pretrained")
-    dec = DepthDecoder(enc.num_ch_enc, scales=opt.scales)
+import argparse
+import networks
+
+def load_model(opt, device, encoder_type="resnet"):
+    if encoder_type == "monovit":
+        # === MonoViT ===
+        encoder = networks.mpvit_small()
+        # Asegura los canales para el decoder: como en tu trainer.py
+        encoder.num_ch_enc = [64, 64, 128, 216, 288]
+        # Usa el decoder de MonoViT si existe en tu repo
+        if hasattr(networks, "DepthDecoderT"):
+            decoder = networks.DepthDecoderT()
+        else:
+            # fallback: si tu implementación usa el decoder normal pero compatible
+            decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=opt.scales)
+    else:
+        # === ResNet (Monodepth2 clásico) ===
+        encoder = networks.ResnetEncoder(opt.num_layers, opt.weights_init == "pretrained")
+        decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=opt.scales)
 
     enc_path = os.path.join(opt.load_weights_folder, "encoder.pth")
     dec_path = os.path.join(opt.load_weights_folder, "depth.pth")
     enc_dict = torch.load(enc_path, map_location=device)
     dec_dict = torch.load(dec_path, map_location=device)
 
+    # Para mantener compatibilidad con tus pesos guardados:
     feed_h = enc_dict.get("height", opt.height)
     feed_w = enc_dict.get("width",  opt.width)
 
-    enc.load_state_dict({k: v for k, v in enc_dict.items() if k in enc.state_dict()})
-    dec.load_state_dict(dec_dict)
+    # Carga “por intersección” de claves
+    model_enc_dict = encoder.state_dict()
+    enc_dict = {k: v for k, v in enc_dict.items() if k in model_enc_dict}
+    missing = set(model_enc_dict.keys()) - set(enc_dict.keys())
+    if len(enc_dict) == 0:
+        raise RuntimeError("No se pudo mapear ninguna clave del encoder.pth al encoder actual. "
+                           "¿Seguro que --encoder_type coincide con los pesos?")
+    model_enc_dict.update(enc_dict)
+    encoder.load_state_dict(model_enc_dict, strict=False)
 
-    enc.to(device).eval()
-    dec.to(device).eval()
-    return enc, dec, feed_h, feed_w
+    model_dec_dict = decoder.state_dict()
+    dec_dict = {k: v for k, v in dec_dict.items() if k in model_dec_dict}
+    model_dec_dict.update(dec_dict)
+    decoder.load_state_dict(model_dec_dict, strict=False)
+
+    encoder.to(device).eval()
+    decoder.to(device).eval()
+    return encoder, decoder, feed_h, feed_w
 
 def load_gt_npz(npz_path):
     npz = np.load(npz_path, allow_pickle=True)
@@ -74,8 +103,9 @@ def load_gt_npz(npz_path):
 def main():
     # Extra flags (no rompen options.py)
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--gt_npz", type=str, default=None,
-                        help="Ruta a gt_depths.npz; por defecto usa splits/<eval_split>/gt_depths.npz")
+    parser.add_argument("--encoder_type", type=str, default="resnet",
+                        choices=["resnet", "monovit"],
+                        help="Tipo de encoder: resnet (Monodepth2) o monovit")
     extra, _ = parser.parse_known_args()
 
     options = MonodepthOptions()
@@ -105,7 +135,7 @@ def main():
     else:
         assert opt.load_weights_folder, "Especifica --ext_disp_to_eval o --load_weights_folder"
         print("-> Loading model from:", opt.load_weights_folder)
-        enc, dec, feed_h, feed_w = load_model(opt, device)
+        enc, dec, feed_h, feed_w = load_model(opt, device, encoder_type=extra.encoder_type)
 
         # Dataset para imágenes
         from datasets import SCAREDDataset
