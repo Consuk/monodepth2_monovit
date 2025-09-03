@@ -100,21 +100,27 @@ def load_gt_npz(npz_path):
     return depths  # [N, H, W]
 
 def main():
-    # Extra flags (no rompen options.py)
     # --- parser previo SOLO para flags extra que no existen en options.py ---
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
         "--encoder_type",
         choices=["resnet", "monovit"],
-        default="resnet",   # pon "monovit" si quieres que sea el default en este script
+        default="resnet",
         help="Tipo de encoder a usar con los pesos cargados"
     )
-    pre_args, _ = pre_parser.parse_known_args()
+    pre_parser.add_argument(
+        "--gt_npz",
+        type=str,
+        default=None,
+        help="Ruta a gt_depths.npz; por defecto usa splits/<eval_split>/gt_depths.npz"
+    )
+    # MUY IMPORTANTE: conservar los args restantes para pasarlos a MonodepthOptions
+    pre_args, remaining = pre_parser.parse_known_args()
     # -----------------------------------------------------------------------
 
-
+    # Ahora crea MonodepthOptions y parsea SOLO los args restantes
     options = MonodepthOptions()
-    opt = options.parse()
+    opt = options.parser.parse_args(remaining)
 
     device = torch.device("cuda" if torch.cuda.is_available() and not opt.no_cuda else "cpu")
 
@@ -124,8 +130,8 @@ def main():
     filenames = readlines(os.path.join(split_dir, list_name))
     N = len(filenames)
 
-    # GT depths
-    gt_npz_path = extra.gt_npz or os.path.join(split_dir, "gt_depths.npz")
+    # GT depths (usa pre_args.gt_npz)
+    gt_npz_path = pre_args.gt_npz or os.path.join(split_dir, "gt_depths.npz")
     assert os.path.isfile(gt_npz_path), f"No existe GT NPZ en: {gt_npz_path}"
     gt_depths = load_gt_npz(gt_npz_path)
     assert gt_depths.shape[0] >= N, f"gt_depths ({gt_depths.shape[0]}) < num samples ({N})"
@@ -140,9 +146,8 @@ def main():
     else:
         assert opt.load_weights_folder, "Especifica --ext_disp_to_eval o --load_weights_folder"
         print("-> Loading model from:", opt.load_weights_folder)
-        enc, dec, feed_h, feed_w = load_model(opt, device, encoder_type=extra.encoder_type)
+        enc, dec, feed_h, feed_w = load_model(opt, device, encoder_type=pre_args.encoder_type)
 
-        # Dataset para imágenes
         from datasets import SCAREDDataset
         ds = SCAREDDataset(opt.data_path, filenames, feed_h, feed_w, [0], 4, is_train=False)
         preds = []
