@@ -84,19 +84,26 @@ class Trainer:
         self.parameters_to_train += list(self.models["depth"].parameters())
 
         if self.use_pose_net:
+            # --- dentro de __init__ en Trainer, donde se crean los modelos ---
+          
             if self.opt.pose_model_type == "separate_resnet":
                 self.models["pose_encoder"] = networks.ResnetEncoder(
                     self.opt.num_layers,
                     self.opt.weights_init == "pretrained",
-                    num_input_images=self.num_pose_frames)
-
+                    num_input_images=self.num_pose_frames
+                )
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
 
+                # MUY IMPORTANTE: usar los canales del pose_encoder (NO del encoder de profundidad)
                 self.models["pose"] = networks.PoseDecoder(
-                    self.models["pose_encoder"].num_ch_enc,
+                    self.models["pose_encoder"].num_ch_enc,   # <--- aquí está la corrección
                     num_input_features=1,
-                    num_frames_to_predict_for=2)
+                    num_frames_to_predict_for=2
+                )
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
+
 
             elif self.opt.pose_model_type == "shared":
                 self.models["pose"] = networks.PoseDecoder(
