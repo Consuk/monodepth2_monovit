@@ -101,8 +101,6 @@ class Trainer:
                     num_input_features=1,
                     num_frames_to_predict_for=2
                 )
-                self.models["pose"].to(self.device)
-                self.parameters_to_train += list(self.models["pose"].parameters())
 
 
             elif self.opt.pose_model_type == "shared":
@@ -115,6 +113,16 @@ class Trainer:
 
             self.models["pose"].to(self.device)
             self.parameters_to_train += list(self.models["pose"].parameters())
+            print("Depth encoder ch:", self.models["encoder"].num_ch_enc)
+            print("Pose encoder ch:", self.models["pose_encoder"].num_ch_enc)
+
+            # Debe coincidir squeeze.in_channels con el último canal del pose_encoder (512)
+            pose_squeeze_in = self.models["pose"].convs["squeeze"].in_channels
+            pose_last = self.models["pose_encoder"].num_ch_enc[-1]
+            print("PoseDecoder squeeze in_channels:", pose_squeeze_in)
+            assert pose_squeeze_in == pose_last, \
+                f"PoseDecoder espera {pose_squeeze_in} canales pero pose_encoder produce {pose_last}"
+
 
         if self.opt.predictive_mask:
             assert self.opt.disable_automasking, \
