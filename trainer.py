@@ -105,7 +105,6 @@ class Trainer:
                     num_frames_to_predict_for=2
                 )
                 self.models["pose"].to(self.device)
-                self.parameters_to_train += list(self.models["pose"].parameters())
 
                 # ✅ Comprobaciones útiles
                 print("Depth encoder ch:", self.models["encoder"].num_ch_enc)
@@ -276,7 +275,8 @@ class Trainer:
                 self.val()
 
             self.step += 1
-        self.model_lr_scheduler.step()
+        if self.model_lr_scheduler is not None:
+            self.model_lr_scheduler.step()
 
     def process_batch(self, inputs):
         """Pass a minibatch through the network and generate images and losses
