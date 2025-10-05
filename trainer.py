@@ -95,12 +95,26 @@ class Trainer:
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
 
-                # MUY IMPORTANTE: usar los canales del pose_encoder (NO del encoder de profundidad)
+                # 🔧 FIX: fuerza los canales correctos de ResNet (no los de MPViT)
+                self.models["pose_encoder"].num_ch_enc = [64, 64, 128, 256, 512]
+
+                # ahora sí, crea el PoseDecoder usando los canales del pose_encoder
                 self.models["pose"] = networks.PoseDecoder(
-                    self.models["pose_encoder"].num_ch_enc,   # <--- aquí está la corrección
+                    self.models["pose_encoder"].num_ch_enc,
                     num_input_features=1,
                     num_frames_to_predict_for=2
                 )
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
+
+                # ✅ Comprobaciones útiles
+                print("Depth encoder ch:", self.models["encoder"].num_ch_enc)
+                print("Pose encoder ch:", self.models["pose_encoder"].num_ch_enc)
+                print("PoseDecoder squeeze in_channels:",
+                    self.models["pose"].convs["squeeze"].in_channels)
+                assert self.models["pose"].convs["squeeze"].in_channels == \
+                    self.models["pose_encoder"].num_ch_enc[-1], \
+                    "PoseDecoder y pose_encoder no coinciden en canales"
 
 
             elif self.opt.pose_model_type == "shared":
