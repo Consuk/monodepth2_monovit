@@ -143,36 +143,40 @@ class MonoDataset(data.Dataset):
         folder, frame_index, side = self.index_to_folder_and_frame_idx(index)
 
         poses = {}
+        # In the original Monodepth2 implementation, each training sample is composed of a
+        # reference frame (frame_index) and its neighbouring frames (frame_index ± i). Here
+        # we restore this behaviour: for each entry in frame_idxs, if the entry is a string
+        # "s" we load the stereo counterpart (other side), otherwise we load the colour
+        # image offset by the temporal index. We wrap the call in a try/except to handle
+        # missing frames gracefully by using a dummy image for non-reference frames. This
+        # ensures that training can proceed when a sequence begins or ends.
         if type(self).__name__ in ["CityscapesPreprocessedDataset", "CityscapesEvalDataset"]:
             inputs.update(self.get_colors(folder, frame_index, side, do_flip))
         else:
             for i in self.frame_idxs:
                 if i == "s":
-                    other_side = {"r": "l", "l": "r"}[side]
-                    inputs[("color", i, -1)] = self.get_color(folder, frame_index, other_side, do_flip)
-                else:
-                    inputs[("color", i, -1)] = self.get_color(folder, frame_index + i, side, do_flip)
-                    # inputs[("color", i, -1)] = self.get_color(folder, frame_index, side, do_flip)
-                    
-                """
-                if i == "s":
+                    # load the opposite stereo view
                     other_side = {"r": "l", "l": "r"}[side]
                     inputs[("color", i, -1)] = self.get_color(
                         folder, frame_index, other_side, do_flip)
                 else:
                     try:
+                        # load neighbouring frame at offset i (e.g., -1, 0, +1)
                         inputs[("color", i, -1)] = self.get_color(
                             folder, frame_index + i, side, do_flip)
                     except FileNotFoundError as e:
                         if i != 0:
-                            # fill with dummy values
-                            inputs[("color", i, -1)] = \
-                                Image.fromarray(np.zeros((100, 100, 3)).astype(np.uint8))
+                            # If neighbour frame is missing, fill with a blank image to
+                            # avoid breaking the pipeline. Pose estimation for this frame
+                            # will be skipped by assigning None.
+                            inputs[("color", i, -1)] = Image.fromarray(
+                                np.zeros((100, 100, 3), dtype=np.uint8))
                             poses[i] = None
                         else:
-                            raise FileNotFoundError(f'Cannot find frame - make sure your '
-                                                    f'--data_path is set correctly, or try adding'
-                                                    f' the --png flag. {e}')"""
+                            # If the reference frame itself is missing, raise an error
+                            raise FileNotFoundError(
+                                f'Cannot find frame - make sure your --data_path is set correctly, '
+                                f'or try adding the --png flag. {e}')
 
         # adjusting intrinsics to match each scale in the pyramid
         for scale in range(self.num_scales):
