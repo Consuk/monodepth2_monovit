@@ -167,11 +167,6 @@ def load_model(load_weights_folder, num_layers, device, arch=None, img_height=No
         dec_state = torch.load(decoder_path, map_location=device)
         depth_decoder.load_state_dict(dec_state, strict=False)
 
-        # Normaliza forward (lista/dict para el decoder)
-        def _enc_fwd(x):
-            f = encoder(x)
-            return f if isinstance(f, (list, tuple, dict)) else [f]
-        encoder.forward = _enc_fwd
 
     else:
         # ---- ResNet (por compatibilidad) ----
