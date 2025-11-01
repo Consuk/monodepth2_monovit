@@ -98,106 +98,108 @@ def _safe_forward_encoder(encoder, x):
     return [feats]
 
 def load_model(load_weights_folder, num_layers, device, arch=None, img_height=None, img_width=None):
-    """
-    Carga encoder y depth_decoder compatibles con ResNet o MonoViT/MPViT.
-    Orden de decisión:
-      1) --arch si viene
-      2) opt.json (arch/encoder/model_name)
-      3) heurística por claves de encoder.pth
-    """
+    import json
+    from importlib import import_module
+    import torch.nn as nn
+
+    def read_opt(weights_folder):
+        candidates = [
+            os.path.join(weights_folder, "opt.json"),
+            os.path.join(os.path.dirname(weights_folder), "opt.json"),
+            os.path.join(os.path.dirname(os.path.dirname(weights_folder)), "opt.json"),
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r") as f:
+                        return json.load(f)
+                except Exception:
+                    pass
+        return {}
+
+    def looks_like_vit(state_dict_keys):
+        mk = ["pos_embed", "patch_embed", "blocks", "norm", "cls_token", "backbone"]
+        ks = " ".join(list(state_dict_keys)[:2000]).lower()
+        return any(m in ks for m in mk)
+
     encoder_path = os.path.join(load_weights_folder, "encoder.pth")
     decoder_path = os.path.join(load_weights_folder, "depth.pth")
-
     if not os.path.isdir(load_weights_folder):
         raise FileNotFoundError(f"Cannot find weights folder: {load_weights_folder}")
     if not os.path.isfile(encoder_path) or not os.path.isfile(decoder_path):
         raise FileNotFoundError("Missing encoder.pth or depth.pth in weights folder")
 
     enc_state = torch.load(encoder_path, map_location=device)
-    opt = _read_opt_json(load_weights_folder)
+    opt = read_opt(load_weights_folder)
 
-    # 1) --arch explícita
+    # Decide arquitectura
     forced_arch = (arch or "").lower() if arch else None
-
-    # 2) opt.json
     opt_arch = None
     for k in ["arch", "encoder", "model_name"]:
         if isinstance(opt.get(k), str):
             v = opt[k].lower()
-            if any(t in v for t in ["vit", "monovit", "mpvit"]):
+            if any(t in v for t in ["vit", "monovit", "mpvit", "deepnet"]):
                 opt_arch = "monovit"; break
-            if "resnet50" in v:
-                opt_arch = "resnet50"; break
-            if "resnet18" in v or "resnet" in v:
-                opt_arch = "resnet18"; break
-
-    # 3) heurística por claves
-    auto_arch = "monovit" if _looks_like_vit(enc_state.keys()) else "resnet18"
-
+            if "resnet50" in v: opt_arch = "resnet50"; break
+            if "resnet18" in v or "resnet" in v: opt_arch = "resnet18"; break
+    auto_arch = "monovit" if looks_like_vit(enc_state.keys()) else "resnet18"
     final_arch = forced_arch or opt_arch or auto_arch
 
-    # Input size: respeta opt.json si existe
     H = int(opt.get("height", img_height or 256))
     W = int(opt.get("width",  img_width  or 320))
 
     if final_arch in ["monovit", "mpvit_small"]:
-        # ===== MONOVIT / MPViT =====
-        # IMPORTANTE: ajusta los nombres de clase/módulo si en tu repo se llaman distinto.
-        #
-        # Intento 1 (nombres más probables):
+        # ==== MONOVIT (MPViT) ====
+        # Encoder: DeepNet vive en networks/mpvit.py
         try:
-            from networks.monovit_encoder import MonoViTEncoder as ViTEncoder
-        except Exception:
-            # Intento 2 (MPViT común):
-            try:
-                from networks.mpvit import MPViTEncoder as ViTEncoder
-            except Exception as e:
-                raise ImportError(
-                    "No pude importar tu encoder ViT. Ajusta aquí los imports "
-                    "(p.ej., networks/monovit_encoder.py o networks/mpvit.py)."
-                ) from e
+            mpvit = import_module("networks.mpvit")
+        except Exception as e:
+            raise ImportError("No pude importar networks.mpvit") from e
 
+        if not hasattr(mpvit, "DeepNet"):
+            raise ImportError("En networks/mpvit.py no encontré la clase DeepNet (encoder).")
+
+        ViTEncoder = getattr(mpvit, "DeepNet")
+
+        # Instanciar DeepNet (no todos los repos piden height/width; probamos flexible)
         try:
-            from networks.monovit_depth_decoder import MonoViTDepthDecoder as ViTDepthDecoder
+            encoder = ViTEncoder(img_height=H, img_width=W)
+        except TypeError:
+            encoder = ViTEncoder()
+
+        # Decoder: primero intentamos el clásico; si no encaja, intentamos HRDecoder
+        try:
+            from networks.depth_decoder import DepthDecoder as DecA
+            depth_decoder = DecA()
+            dec_state = torch.load(decoder_path, map_location=device)
+            md = depth_decoder.load_state_dict(dec_state, strict=False)
         except Exception:
-            # Intento 2: otro nombre frecuente para decoder ViT
-            try:
-                from networks.depth_decoder_vit import DepthDecoderViT as ViTDepthDecoder
-            except Exception as e:
-                raise ImportError(
-                    "No pude importar tu depth decoder para ViT. Ajusta el import a tu archivo real "
-                    "(p.ej., networks/monovit_depth_decoder.py o networks/depth_decoder_vit.py)."
-                ) from e
+            from networks.hr_decoder import HRDepthDecoder as DecB
+            depth_decoder = DecB()
+            dec_state = torch.load(decoder_path, map_location=device)
+            md = depth_decoder.load_state_dict(dec_state, strict=False)
 
-        # Instancia (ajusta args si tus clases piden otros)
-        variant = "mpvit_small" if final_arch == "mpvit_small" else "monovit"
-        encoder = ViTEncoder(img_height=H, img_width=W, variant=variant)
-        depth_decoder = ViTDepthDecoder()
+        # Cargar pesos del encoder con tolerancia
+        me = encoder.load_state_dict(enc_state, strict=False)
+        if isinstance(me, tuple):
+            missing_e, unexpected_e = me
+            if missing_e:   print(f"[WARN] Encoder: faltaron {len(missing_e)} claves (ok).")
+            if unexpected_e:print(f"[WARN] Encoder: {len(unexpected_e)} claves inesperadas (ok).")
 
-        # Carga de pesos con tolerancia
-        missing_e, unexpected_e = encoder.load_state_dict(enc_state, strict=False)
-        if isinstance(missing_e, list) and len(missing_e) > 0:
-            print(f"[WARN] Faltaron {len(missing_e)} claves en encoder (ok): {missing_e[:5]}...")
-        if isinstance(unexpected_e, list) and len(unexpected_e) > 0:
-            print(f"[WARN] Pesos inesperados en encoder (ok): {unexpected_e[:5]}...")
-
-        dec_state = torch.load(decoder_path, map_location=device)
-        missing_d, unexpected_d = depth_decoder.load_state_dict(dec_state, strict=False)
-        if isinstance(unexpected_d, list) and len(unexpected_d) > 0:
-            print(f"[WARN] Pesos inesperados en depth_decoder (ok): {unexpected_d[:5]}...")
-
-        # pegamos un wrapper simple para estandarizar forward en el resto del script
-        def enc_forward(x):
-            return _safe_forward_encoder(encoder, x)
-        encoder.forward = enc_forward
+        # Uniformar el forward: devolver lista/dict de features aceptada por el decoder
+        def _safe_forward(x):
+            f = encoder(x)
+            if isinstance(f, (dict, list, tuple)):
+                return f
+            return [f]
+        encoder.forward = _safe_forward
 
     else:
-        # ===== RESNET (comportamiento original) =====
+        # ==== RESNET (original) ====
         encoder = networks.ResnetEncoder(num_layers, False)
         depth_decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=range(4))
 
         model_dict = encoder.state_dict()
-        # filtra sólo las claves existentes
         enc_filtered = {k: v for k, v in enc_state.items() if k in model_dict}
         model_dict.update(enc_filtered)
         encoder.load_state_dict(model_dict)
@@ -207,9 +209,9 @@ def load_model(load_weights_folder, num_layers, device, arch=None, img_height=No
 
     encoder.to(device).eval()
     depth_decoder.to(device).eval()
-
     print(f"-> Encoder detectado: {final_arch} | Input {H}x{W}")
     return encoder, depth_decoder, final_arch, (H, W)
+
 
 
 
