@@ -127,7 +127,6 @@ def load_model(load_weights_folder, num_layers, device, arch=None, img_height=No
     enc_state = torch.load(encoder_path, map_location=device)
     opt = read_opt(load_weights_folder)
 
-    # Decide arquitectura (si viene --arch lo respetamos)
     forced_arch = (arch or "").lower() if arch else None
     opt_arch = None
     for k in ["arch","encoder","model_name"]:
@@ -144,51 +143,54 @@ def load_model(load_weights_folder, num_layers, device, arch=None, img_height=No
     W = int(opt.get("width",  img_width  or 320))
 
     if final_arch == "mpvit":
-        # -------- MPViT encoder --------
+        # ---- MPViT encoder (tu repo) ----
         mpvit = import_module("networks.mpvit")
-        # el variante que usaste (según tu contexto, small). Cambia aquí si usaste xsmall/base:
+        # Usaste mpvit_small; si cambiaste variante, ajusta aquí:
         EncoderFactory = getattr(mpvit, "mpvit_small", None) or getattr(mpvit, "mpvit_xsmall", None)
         if EncoderFactory is None:
             raise ImportError("No encontré mpvit_small/mpvit_xsmall en networks/mpvit.py")
 
-        encoder = EncoderFactory()              # MPViT no requiere H/W para instanciar
-        me = encoder.load_state_dict(enc_state, strict=False)
-        if isinstance(me, tuple):
-            miss, unexp = me
-            if miss:  print(f"[WARN] Encoder missing: {len(miss)} claves (ok)")
-            if unexp: print(f"[WARN] Encoder unexpected: {len(unexp)} claves (ok)")
+        encoder = EncoderFactory()
+        # Cargar pesos del encoder con tolerancia (ignora height/width/use_stereo)
+        encoder.load_state_dict(enc_state, strict=False)
 
-        # -------- Depth decoder --------
-        # 1) intenta el decoder clásico
-        try:
-            from networks.depth_decoder import DepthDecoder as DepthDec
-            depth_decoder = DepthDec()
-            md = depth_decoder.load_state_dict(torch.load(decoder_path, map_location=device), strict=False)
-        except Exception:
-            # 2) fallback: HR decoder si lo entrenaste así
-            from networks.hr_decoder import HRDepthDecoder as DepthDec
-            depth_decoder = DepthDec()
-            md = depth_decoder.load_state_dict(torch.load(decoder_path, map_location=device), strict=False)
+        # ---- DepthDecoder necesita num_ch_enc -> calcúlalo con un forward dummy ----
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, H, W, device=device)
+            feats = encoder(dummy)   # MPViT devuelve lista de 5 features
+        if not isinstance(feats, (list, tuple)) or len(feats) < 4:
+            raise RuntimeError("El encoder MPViT no regresó una lista de features esperada.")
+        num_ch_enc = [f.shape[1] for f in feats]   # esperado: [64,128,216,288,288]
 
-        # Normaliza forward del encoder: devolver lista/dict aceptado por el decoder
+        from networks.depth_decoder import DepthDecoder
+        depth_decoder = DepthDecoder(num_ch_enc=num_ch_enc, scales=range(4))
+        dec_state = torch.load(decoder_path, map_location=device)
+        depth_decoder.load_state_dict(dec_state, strict=False)
+
+        # Normaliza forward (lista/dict para el decoder)
         def _enc_fwd(x):
             f = encoder(x)
             return f if isinstance(f, (list, tuple, dict)) else [f]
         encoder.forward = _enc_fwd
 
     else:
-        # -------- ResNet (original) --------
+        # ---- ResNet (por compatibilidad) ----
         encoder = networks.ResnetEncoder(num_layers, False)
-        depth_decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=range(4))
+        from networks.depth_decoder import DepthDecoder
+        depth_decoder = DepthDecoder(encoder.num_ch_enc, scales=range(4))
+
         ed = encoder.state_dict()
         ed.update({k: v for k, v in enc_state.items() if k in ed})
         encoder.load_state_dict(ed)
         depth_decoder.load_state_dict(torch.load(decoder_path, map_location=device))
 
+        num_ch_enc = "resnet-default"
+
     encoder.to(device).eval()
     depth_decoder.to(device).eval()
-    print(f"-> Encoder detectado: {final_arch} | Input {H}x{W}")
+    print(f"-> Encoder detectado: {final_arch} | Input {H}x{W} | num_ch_enc={num_ch_enc}")
     return encoder, depth_decoder, final_arch, (H, W)
+
 
 
 
