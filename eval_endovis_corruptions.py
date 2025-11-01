@@ -151,8 +151,8 @@ def load_model(load_weights_folder, num_layers, device, arch=None, img_height=No
             raise ImportError("No encontré mpvit_small/mpvit_xsmall en networks/mpvit.py")
 
         encoder = EncoderFactory()
-        # Cargar pesos del encoder con tolerancia (ignora height/width/use_stereo)
         encoder.load_state_dict(enc_state, strict=False)
+        encoder.to(device).eval()
 
         # ---- DepthDecoder necesita num_ch_enc -> calcúlalo con un forward dummy ----
         with torch.no_grad():
