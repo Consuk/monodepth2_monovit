@@ -56,7 +56,10 @@ def load_model(load_weights_folder, num_layers, device):
 
     encoder = networks.mpvit_small()
     encoder.num_ch_enc = [64, 128, 216, 288, 288]
-    depth_decoder = networks.DepthDecoderT()
+    depth_decoder = networks.DepthDecoder(
+            encoder.num_ch_enc,
+            scales=range(4)  # This matches how it's constructed in your training
+        )
 
     encoder_dict = torch.load(encoder_path, map_location=device)
     model_dict = encoder.state_dict()
