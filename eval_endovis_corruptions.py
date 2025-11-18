@@ -8,7 +8,6 @@ import cv2
 from collections import defaultdict
 from datasets import SCAREDRAWDataset
 
-
 import torch
 from torch.utils.data import DataLoader
 
@@ -45,151 +44,28 @@ def compute_errors(gt, pred):
     sq_rel  = np.mean(((gt - pred) ** 2) / gt)
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
 
-
-def _read_opt_json(weights_folder):
-    """
-    Intenta leer opt.json cerca de la carpeta de pesos.
-    Ejemplos:
-      logsMonovit/monovit_sepResPose/models/weights_19/
-        -> .../models/opt.json
-    """
-    import json
-    candidates = [
-        os.path.join(weights_folder, "opt.json"),
-        os.path.join(os.path.dirname(weights_folder), "opt.json"),
-        os.path.join(os.path.dirname(os.path.dirname(weights_folder)), "opt.json"),
-    ]
-    for p in candidates:
-        if os.path.isfile(p):
-            try:
-                with open(p, "r") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-    return {}
-
-def _looks_like_vit(state_dict_keys):
-    """
-    Heurística simple: si hay marcadores típicos de ViT/MonoViT en las claves.
-    Ajusta si tu repo usa otros nombres.
-    """
-    vit_markers = [
-        "pos_embed", "patch_embed", "blocks", "norm", "backbone",
-        "encoder.transformer", "encoder.vit", "encoder.mlp"
-    ]
-    keys = list(state_dict_keys)
-    sample = " ".join(keys[:2000])
-    return any(m in sample for m in vit_markers)
-
-def _safe_forward_encoder(encoder, x):
-    """
-    Estandariza la salida del encoder para el depth_decoder.
-    - Si devuelve lista/tupla/dict, lo pasamos tal cual.
-    - Si devuelve un solo tensor, lo envolvemos donde haga sentido.
-    Ajusta si tu decoder ViT requiere una llave específica.
-    """
-    feats = encoder(x)
-    # casos comunes:
-    if isinstance(feats, dict):
-        return feats
-    if isinstance(feats, (list, tuple)):
-        return feats
-    # fallback: un solo mapa -> en monodepth2 original se espera lista de features
-    return [feats]
-
-def load_model(load_weights_folder, num_layers, device, arch=None, img_height=None, img_width=None):
-    import json
-    from importlib import import_module
-
-    def read_opt(weights_folder):
-        for p in [
-            os.path.join(weights_folder, "opt.json"),
-            os.path.join(os.path.dirname(weights_folder), "opt.json"),
-            os.path.join(os.path.dirname(os.path.dirname(weights_folder)), "opt.json"),
-        ]:
-            if os.path.isfile(p):
-                try:
-                    with open(p, "r") as f:
-                        return json.load(f)
-                except Exception:
-                    pass
-        return {}
-
-    def looks_like_vit(keys):
-        ks = " ".join(list(keys)[:2000]).lower()
-        return any(m in ks for m in ["pos_embed","patch_embed","blocks","norm","cls_token","backbone"])
-
+def load_model(load_weights_folder, num_layers, device):
+    """Carga encoder.pth y depth.pth una sola vez."""
     encoder_path = os.path.join(load_weights_folder, "encoder.pth")
     decoder_path = os.path.join(load_weights_folder, "depth.pth")
+
+    if not os.path.isdir(load_weights_folder):
+        raise FileNotFoundError(f"Cannot find weights folder: {load_weights_folder}")
     if not os.path.isfile(encoder_path) or not os.path.isfile(decoder_path):
         raise FileNotFoundError("Missing encoder.pth or depth.pth in weights folder")
 
-    enc_state = torch.load(encoder_path, map_location=device)
-    opt = read_opt(load_weights_folder)
+    encoder = networks.mpvit_small()
+    encoder.num_ch_enc = [64, 128, 216, 288, 288]
+    depth_decoder = networks.DepthDecoderT()
 
-    forced_arch = (arch or "").lower() if arch else None
-    opt_arch = None
-    for k in ["arch","encoder","model_name"]:
-        v = opt.get(k)
-        if isinstance(v, str):
-            vl = v.lower()
-            if any(t in vl for t in ["mpvit","vit","monovit","deepnet"]): opt_arch = "mpvit"; break
-            if "resnet50" in vl: opt_arch = "resnet50"; break
-            if "resnet18" in vl or "resnet" in vl: opt_arch = "resnet18"; break
-    auto_arch = "mpvit" if looks_like_vit(enc_state.keys()) else "resnet18"
-    final_arch = forced_arch or opt_arch or auto_arch
-
-    H = int(opt.get("height", img_height or 256))
-    W = int(opt.get("width",  img_width  or 320))
-
-    if final_arch == "mpvit":
-        # ---- MPViT encoder (tu repo) ----
-        mpvit = import_module("networks.mpvit")
-        # Usaste mpvit_small; si cambiaste variante, ajusta aquí:
-        EncoderFactory = getattr(mpvit, "mpvit_small", None) or getattr(mpvit, "mpvit_xsmall", None)
-        if EncoderFactory is None:
-            raise ImportError("No encontré mpvit_small/mpvit_xsmall en networks/mpvit.py")
-
-        encoder = EncoderFactory()
-        encoder.load_state_dict(enc_state, strict=False)
-        encoder.to(device).eval()
-
-        # ---- DepthDecoder necesita num_ch_enc -> calcúlalo con un forward dummy ----
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, H, W, device=device)
-            feats = encoder(dummy)   # MPViT devuelve lista de 5 features
-        if not isinstance(feats, (list, tuple)) or len(feats) < 4:
-            raise RuntimeError("El encoder MPViT no regresó una lista de features esperada.")
-        num_ch_enc = [f.shape[1] for f in feats]   # esperado: [64,128,216,288,288]
-
-        from networks.depth_decoder import DepthDecoder
-        depth_decoder = DepthDecoder(num_ch_enc=num_ch_enc, scales=range(4))
-        dec_state = torch.load(decoder_path, map_location=device)
-        depth_decoder.load_state_dict(dec_state, strict=False)
-
-
-    else:
-        # ---- ResNet (por compatibilidad) ----
-        encoder = networks.ResnetEncoder(num_layers, False)
-        from networks.depth_decoder import DepthDecoder
-        depth_decoder = DepthDecoder(encoder.num_ch_enc, scales=range(4))
-
-        ed = encoder.state_dict()
-        ed.update({k: v for k, v in enc_state.items() if k in ed})
-        encoder.load_state_dict(ed)
-        depth_decoder.load_state_dict(torch.load(decoder_path, map_location=device))
-
-        num_ch_enc = "resnet-default"
+    encoder_dict = torch.load(encoder_path, map_location=device)
+    model_dict = encoder.state_dict()
+    encoder.load_state_dict({k: v for k, v in encoder_dict.items() if k in model_dict})
+    depth_decoder.load_state_dict(torch.load(decoder_path, map_location=device))
 
     encoder.to(device).eval()
     depth_decoder.to(device).eval()
-    print(f"-> Encoder detectado: {final_arch} | Input {H}x{W} | num_ch_enc={num_ch_enc}")
-    return encoder, depth_decoder, final_arch, (H, W)
-
-
-
-
-
+    return encoder, depth_decoder
 
 def _parse_split_line(line: str):
     """
@@ -203,7 +79,6 @@ def _parse_split_line(line: str):
     ds, keyf, frame_str, side = parts[0], parts[1], parts[2], parts[3]
     return ds, keyf, int(frame_str), side
 
-
 def _build_img_path(root, ds, keyf, frame_idx, png=False):
     """
     Construye la ruta real:
@@ -211,7 +86,6 @@ def _build_img_path(root, ds, keyf, frame_idx, png=False):
     """
     ext = ".png" if png else ".jpg"
     return os.path.join(root, ds, keyf, "data", f"{frame_idx}{ext}")
-
 
 class SimpleImageDataset(torch.utils.data.Dataset):
     """Dataset mínimo que toma rutas absolutas ya resueltas."""
@@ -229,7 +103,6 @@ class SimpleImageDataset(torch.utils.data.Dataset):
         img = np.asarray(img).astype(np.float32) / 255.0
         img = torch.from_numpy(img).permute(2, 0, 1)  # C,H,W
         return {("color", 0, 0): img}
-
 
 def map_split_to_existing_paths(data_path_root, filenames, png=False, strict=False):
     """
@@ -263,7 +136,6 @@ def map_split_to_existing_paths(data_path_root, filenames, png=False, strict=Fal
         )
 
     return idx_keep, real_paths, missing
-
 
 def evaluate_one_root(data_path_root,
                       filenames,
@@ -401,8 +273,6 @@ def evaluate_one_root(data_path_root,
     # abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
     return mean_errors
 
-
-
 def list_corruption_dirs(root):
     """
     Devuelve los directorios de primer nivel que representan corrupciones.
@@ -418,7 +288,6 @@ def list_corruption_dirs(root):
     # Si no, asumimos que root contiene muchas corrupciones como subcarpetas
     return [os.path.join(root, d) for d in sorted(os.listdir(root))
             if os.path.isdir(os.path.join(root, d))]
-
 
 def main():
     parser = argparse.ArgumentParser("Evaluate EndoVIS corruptions (16x5) with AF-SfMLearner weights")
@@ -438,7 +307,6 @@ def main():
     parser.add_argument("--output_csv", type=str, default="corruptions_summary.csv")
     parser.add_argument("--strict", action="store_true",
                         help="Modo estricto: exige que todas las entradas del split existan en cada severidad.")
-    parser.add_argument("--arch",type=str, default=None, choices=["resnet18", "resnet50", "monovit", "mpvit_small"], help="Tipo de encoder. Si no se especifica, se autodetecta por encoder.pth/opt.json.")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -466,15 +334,7 @@ def main():
 
     # Cargar modelo (una sola vez)
     print("-> Cargando pesos:", args.load_weights_folder)
-    encoder, depth_decoder, used_arch, (H, W) = load_model(
-        args.load_weights_folder,
-        args.num_layers,
-        device,
-        arch=args.arch,
-        img_height=args.height,
-        img_width=args.width
-    )
-
+    encoder, depth_decoder = load_model(args.load_weights_folder, args.num_layers, device)
 
     # Detectar corrupciones a evaluar
     corr_dirs = list_corruption_dirs(args.corruptions_root)
