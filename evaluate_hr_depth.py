@@ -113,7 +113,11 @@ def evaluate(opt):
 
         encoder = networks.mpvit_small() #networks.ResnetEncoder(opt.num_layers, False)
         encoder.num_ch_enc = [64,128,216,288,288]  # = networks.ResnetEncoder(opt.num_layers, False)
-        depth_decoder = networks.DepthDecoderT()
+        depth_decoder = networks.DepthDecoder(
+            encoder.num_ch_enc,
+            scales=range(4)  # This matches how it's constructed in your training
+        )
+
 
         model_dict = encoder.state_dict()
         encoder.load_state_dict({k: v for k, v in encoder_dict.items() if k in model_dict})
