@@ -35,7 +35,7 @@ class MonodepthOptions:
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark","endovis"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark","endovis", "hamlyn"],
                                  default="eigen_zhou")
         self.parser.add_argument("--num_layers",
                                  type=int,
@@ -46,7 +46,7 @@ class MonodepthOptions:
                                  type=str,
                                  help="dataset to train on",
                                  default="endovis",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test","endovis"])
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test","endovis", "hamlyn"])
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")
