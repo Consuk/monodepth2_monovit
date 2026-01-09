@@ -241,7 +241,7 @@ def evaluate(opt):
     print(f"-> num_pred: {num_pred}, num_gt: {num_gt}")
     assert num_pred == num_gt, f"Mismatch: {num_pred} predictions vs {num_gt} gt depth maps"
 
-    print("gt_depths shape:", gt_depths.shape, "dtype:", gt_depths.dtype)
+    # print("gt_depths shape:", gt_depths.shape, "dtype:", gt_depths.dtype)
 
     print("-> Evaluating")
 
