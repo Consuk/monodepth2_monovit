@@ -57,7 +57,7 @@ class Trainer:
         # **Depth Encoder**: MPViT (MonoViT) backbone
         self.models["encoder"] = mpvit_tiny()  # default in_chans=3 for RGB input
         # Manually set num_ch_enc based on MPViT output channels (including stem)
-        self.models["encoder"].num_ch_enc = [64, 96, 176, 216, 216]
+        self.models["encoder"].num_ch_enc = [64, 96, 176, 216]
         self.models["depth"] = networks.DepthDecoder(
             self.models["encoder"].num_ch_enc[::-1], self.opt.scales  # reverse here
         )
@@ -74,7 +74,7 @@ class Trainer:
                 # Separate pose encoder using MPViT (accepts concatenated pair of images as 6-channel input)
                 pose_enc_channels = 3 * self.num_pose_frames  # e.g., 6 channels for two frames
                 self.models["pose_encoder"] = mpvit_tiny(in_chans=pose_enc_channels)
-                self.models["pose_encoder"].num_ch_enc = [64, 96, 176, 216, 216]
+                self.models["pose_encoder"].num_ch_enc = [64, 96, 176, 216]
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
                 # Pose decoder takes the pose encoder's feature channels; predict pose for 2 frames (target and one source)
