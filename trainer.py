@@ -87,6 +87,9 @@ class Trainer:
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
                 self.models["pose_encoder"] = networks.mpvit_small()
                 self.models["pose_encoder"].num_ch_enc = [64, 128, 216, 288, 288]
+                self.models["pose_encoder"].to(self.device)  # ✅ move to GPU
+                self.parameters_to_train += list(self.models["pose_encoder"].parameters())
+
 
 
 
