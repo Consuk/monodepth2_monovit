@@ -1,87 +1,114 @@
 from __future__ import absolute_import, division, print_function
 
+
 import numpy as np
 import time
-import copy
+
 
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
+
+
+import json
+
 
 from networks.mpvit import mpvit_small
-import networks
 from utils import *
 from kitti_utils import *
 from layers import *
-import datasets
-import wandb
 
-_DEPTH_COLORMAP = plt.get_cmap('plasma', 256)  # for plotting colorized depth
+
+import datasets
+import networks
+import wandb
+import matplotlib.pyplot as plt
+_DEPTH_COLORMAP = plt.get_cmap('plasma', 256) # for plotting
+
+
+
 
 class Trainer:
     def __init__(self, options):
         self.opt = options
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
 
-        # ensure image dimensions are multiples of 32 for encoder
+
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
         assert self.opt.width % 32 == 0, "'width' must be a multiple of 32"
 
+
         self.models = {}
         self.parameters_to_train = []
+
+
         self.device = torch.device("cpu" if self.opt.no_cuda else "cuda")
+
 
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
         self.num_pose_frames = 2 if self.opt.pose_model_input == "pairs" else self.num_input_frames
 
+
         assert self.opt.frame_ids[0] == 0, "frame_ids must start with 0"
+
+
         self.use_pose_net = not (self.opt.use_stereo and self.opt.frame_ids == [0])
+
 
         if self.opt.use_stereo:
             self.opt.frame_ids.append("s")
 
-        # Depth encoder: use MonoViT for Hamlyn, ResNet otherwise
-        self.models["encoder"] = networks.mpvit_small()
-        # Set output channels for each feature scale (for DepthDecoder)
+
+        # Depth encoder using MPViT
+        self.models["encoder"] = mpvit_small()
         self.models["encoder"].num_ch_enc = [64, 128, 216, 288, 288]
-                                                       
         self.models["encoder"].to(self.device)
         self.parameters_to_train += list(self.models["encoder"].parameters())
 
-        # Depth decoder
-        self.models["depth"] = networks.DepthDecoder(self.models["encoder"].num_ch_enc, self.opt.scales)
+
+        self.models["depth"] = networks.DepthDecoder(
+        self.models["encoder"].num_ch_enc,
+        self.opt.scales
+        )
         self.models["depth"].to(self.device)
         self.parameters_to_train += list(self.models["depth"].parameters())
 
-        # Pose networks (only if training monocular self-supervised)
+
         if self.use_pose_net:
             if self.opt.pose_model_type == "separate_resnet":
-                # Pose encoder (ResNet)
-                self.models["pose_encoder"] = networks.ResnetEncoder(self.opt.num_layers,
-                                                                      self.opt.weights_init == "pretrained",
-                                                                      num_input_images=self.num_pose_frames)
+                self.models["pose_encoder"] = networks.ResnetEncoder(
+                self.opt.num_layers,
+                self.opt.weights_init == "pretrained",
+                num_input_images=self.num_pose_frames
+                )
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
-                # Ensure correct ResNet channel sizes
-                if self.opt.num_layers in [50, 101, 152]:
-                    self.models["pose_encoder"].num_ch_enc = [64, 256, 512, 1024, 2048]
-                else:
-                    self.models["pose_encoder"].num_ch_enc = [64, 64, 128, 256, 512]
-                # Pose decoder
-                self.models["pose"] = networks.PoseDecoder(self.models["pose_encoder"].num_ch_enc,
-                                                          num_input_features=1,
-                                                          num_frames_to_predict_for=2)
+                self.models["pose_encoder"].num_ch_enc = [64, 64, 128, 256, 512]
+
+
+                self.models["pose"] = networks.PoseDecoder(
+                self.models["pose_encoder"].num_ch_enc,
+                num_input_features=1,
+                num_frames_to_predict_for=2
+                )
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
+
+
             elif self.opt.pose_model_type == "shared":
-                # Pose decoder that uses depth encoder features
-                self.models["pose"] = networks.PoseDecoder(self.models["encoder"].num_ch_enc,
-                                                          num_frames_to_predict_for=self.num_pose_frames)
+                self.models["pose"] = networks.PoseDecoder(
+                self.models["encoder"].num_ch_enc, self.num_pose_frames)
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
+
+
             elif self.opt.pose_model_type == "posecnn":
-                self.models["pose"] = networks.PoseCNN(self.num_input_frames if self.opt.pose_model_input == "all" else 2)
-            self.models["pose"].to(self.device)
-            self.parameters_to_train += list(self.models["pose"].parameters())
+                self.models["pose"] = networks.PoseCNN(
+                self.num_input_frames if self.opt.pose_model_input == "all" else 2)
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
 
         # Predictive mask network (if using predictive masking baseline)
         if self.opt.predictive_mask:
