@@ -1,5 +1,4 @@
 from __future__ import absolute_import, division, print_function
-from pyexpat import features
 
 import numpy as np
 import time
@@ -57,9 +56,9 @@ class Trainer:
         # **Depth Encoder**: MPViT (MonoViT) backbone
         self.models["encoder"] = mpvit_tiny()  # default in_chans=3 for RGB input
         # Manually set num_ch_enc based on MPViT output channels (including stem)
-        self.models["encoder"].num_ch_enc = [64, 96, 176, 216]
+        self.models["encoder"].num_ch_enc = [64, 64, 96, 176, 216]
         self.models["depth"] = networks.DepthDecoder(
-            self.models["encoder"].num_ch_enc[::-1], self.opt.scales  # reverse here
+            self.models["encoder"].num_ch_enc, self.opt.scales  
         )
         self.models["encoder"].to(self.device)
         self.parameters_to_train += list(self.models["encoder"].parameters())
@@ -74,7 +73,7 @@ class Trainer:
                 # Separate pose encoder using MPViT (accepts concatenated pair of images as 6-channel input)
                 pose_enc_channels = 3 * self.num_pose_frames  # e.g., 6 channels for two frames
                 self.models["pose_encoder"] = mpvit_tiny(in_chans=pose_enc_channels)
-                self.models["pose_encoder"].num_ch_enc = [64, 96, 176, 216]
+                self.models["pose_encoder"].num_ch_enc = [64, 64, 96, 176, 216]
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
                 # Pose decoder takes the pose encoder's feature channels; predict pose for 2 frames (target and one source)
@@ -264,13 +263,12 @@ class Trainer:
 
             with autocast():
                 outputs, losses = self.process_batch(inputs)
-                loss = sum(losses.values())
+                loss = losses["loss"]
 
-            self.model_optimizer.zero_grad()
+            self.model_optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             self.scaler.step(self.model_optimizer)
             self.scaler.update()
-
 
 
             duration = time.time() - before_op_time
@@ -307,9 +305,7 @@ class Trainer:
         else:
             # Separate encoder (or no pose net): only use frame 0 for depth
             features = self.models["encoder"](inputs[("color_aug", 0, 0)])
-            features = features[::-1]  # Reverse for top-down decoder order
-            with autocast():
-                outputs = self.models["depth"](features)
+            outputs = self.models["depth"](features)
 
 
         # If predictive masking is used, compute mask
