@@ -12,8 +12,8 @@ from options import MonodepthOptions
 options = MonodepthOptions()
 opts = options.parse()
 
-# import torch
-# torch.cuda.set_per_process_memory_fraction(0.85, 0)  # Use only 85% of GPU memory
+import torch
+torch.cuda.set_per_process_memory_fraction(0.85, 0)  # Use only 85% of GPU memory
 
 
 if __name__ == "__main__":
