@@ -85,14 +85,17 @@ class Trainer:
                 )
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
-                self.models["pose_encoder"].num_ch_enc = [64, 64, 128, 256, 512]
+                self.models["pose_encoder"] = networks.mpvit_small()
+                self.models["pose_encoder"].num_ch_enc = [64, 128, 216, 288, 288]
+
 
 
                 self.models["pose"] = networks.PoseDecoder(
                 self.models["pose_encoder"].num_ch_enc,
                 num_input_features=1,
                 num_frames_to_predict_for=2
-                )
+            )
+
                 self.models["pose"].to(self.device)
                 self.parameters_to_train += list(self.models["pose"].parameters())
 
