@@ -50,7 +50,7 @@ class DepthDecoder(nn.Module):
             if self.use_skips and i > 0:
                 skip = input_features[i - 1]
                 if skip.shape[2:] != x[0].shape[2:]:
-                    skip = F.interpolate(skip.half(), size=x[0].shape[2:], mode="nearest").float()
+                    skip = F.interpolate(skip, size=x[0].shape[2:], mode="nearest")
                 x += [skip]
             x = torch.cat(x, 1)
             x = self.convs[("upconv", i, 1)](x)
