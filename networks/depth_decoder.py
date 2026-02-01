@@ -9,6 +9,7 @@ from __future__ import absolute_import, division, print_function
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from collections import OrderedDict
 from layers import *
@@ -56,7 +57,10 @@ class DepthDecoder(nn.Module):
             x = self.convs[("upconv", i, 0)](x)
             x = [upsample(x)]
             if self.use_skips and i > 0:
-                x += [input_features[i - 1]]
+                skip = input_features[i - 1]
+                if skip.shape[2:] != x[0].shape[2:]:
+                    skip = F.interpolate(skip, size=x[0].shape[2:], mode="nearest")
+                x.append(skip)
             x = torch.cat(x, 1)
             x = self.convs[("upconv", i, 1)](x)
             if i in self.scales:
