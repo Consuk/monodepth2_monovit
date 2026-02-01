@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from collections import OrderedDict
 from layers import *
 
+
 class DepthDecoder(nn.Module):
     def __init__(self, num_ch_enc, scales=range(4), num_output_channels=1, use_skips=True):
         super(DepthDecoder, self).__init__()
@@ -48,11 +49,11 @@ class DepthDecoder(nn.Module):
             x = self.convs[("upconv", i, 0)](x)
             x = [upsample(x)]
 
-            skip = input_features[i - 1]
-            # Only interpolate if spatial sizes differ significantly (to avoid huge upsampling)
-            if skip.shape[2:] != x[0].shape[2:]:
-                skip = F.interpolate(skip, size=x[0].shape[2:], mode="bilinear", align_corners=False)
-            x += [skip]
+            if self.use_skips and i > 1:  # skip i = 1 to save memory
+                skip = input_features[i - 1]
+                if skip.shape[2:] != x[0].shape[2:]:
+                    skip = F.interpolate(skip, size=x[0].shape[2:], mode="bilinear", align_corners=False)
+                x += [skip]
 
             x = torch.cat(x, 1)
             x = self.convs[("upconv", i, 1)](x)
@@ -61,4 +62,3 @@ class DepthDecoder(nn.Module):
                 self.outputs[("disp", i)] = self.sigmoid(self.convs[("dispconv", i)](x))
 
         return self.outputs
-
