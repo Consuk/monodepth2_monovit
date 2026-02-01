@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 import json
 
-from networks.mpvit import mpvit_small
+from networks.mpvit import mpvit_tiny
 from utils import *
 from kitti_utils import *
 from layers import *
@@ -49,7 +49,7 @@ class Trainer:
             self.opt.frame_ids.append("s")
 
         # **Depth Encoder**: MPViT (MonoViT) backbone
-        self.models["encoder"] = mpvit_small()  # default in_chans=3 for RGB input
+        self.models["encoder"] = mpvit_tiny()  # default in_chans=3 for RGB input
         # Manually set num_ch_enc based on MPViT output channels (including stem)
         self.models["encoder"].num_ch_enc = [64, 128, 216, 288, 288]
         self.models["encoder"].to(self.device)
@@ -65,7 +65,7 @@ class Trainer:
             if self.opt.pose_model_type == "separate_resnet":
                 # Separate pose encoder using MPViT (accepts concatenated pair of images as 6-channel input)
                 pose_enc_channels = 3 * self.num_pose_frames  # e.g., 6 channels for two frames
-                self.models["pose_encoder"] = mpvit_small(in_chans=pose_enc_channels)
+                self.models["pose_encoder"] = mpvit_tiny(in_chans=pose_enc_channels)
                 self.models["pose_encoder"].num_ch_enc = [64, 128, 216, 288, 288]
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
