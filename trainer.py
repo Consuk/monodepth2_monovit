@@ -293,7 +293,9 @@ class Trainer:
         else:
             # Separate encoder (or no pose net): only use frame 0 for depth
             features = self.models["encoder"](inputs[("color_aug", 0, 0)])
+            features = features[::-1]  # Reverse for top-down decoder order
             outputs = self.models["depth"](features)
+
 
         # If predictive masking is used, compute mask
         if self.opt.predictive_mask:
