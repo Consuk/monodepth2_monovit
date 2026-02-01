@@ -1,19 +1,11 @@
-# Copyright Niantic 2019. Patent Pending. All rights reserved.
-#
-# This software is licensed under the terms of the Monodepth2 licence
-# which allows for non-commercial use only, the full terms of which are made
-# available in the LICENSE file.
-
 from __future__ import absolute_import, division, print_function
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from collections import OrderedDict
 from layers import *
-
 
 class DepthDecoder(nn.Module):
     def __init__(self, num_ch_enc, scales=range(4), num_output_channels=1, use_skips=True):
@@ -25,7 +17,7 @@ class DepthDecoder(nn.Module):
         self.scales = scales
 
         self.num_ch_enc = num_ch_enc
-        self.num_ch_dec = np.array([16, 32, 64, 128, 256])
+        self.num_ch_dec = np.array([64, 128, 216, 288, 512])
 
         # decoder
         self.convs = OrderedDict()
@@ -51,7 +43,6 @@ class DepthDecoder(nn.Module):
     def forward(self, input_features):
         self.outputs = {}
 
-        # decoder
         x = input_features[-1]
         for i in range(4, -1, -1):
             x = self.convs[("upconv", i, 0)](x)
@@ -59,8 +50,8 @@ class DepthDecoder(nn.Module):
             if self.use_skips and i > 0:
                 skip = input_features[i - 1]
                 if skip.shape[2:] != x[0].shape[2:]:
-                    skip = F.interpolate(skip, size=x[0].shape[2:], mode="nearest")
-                x.append(skip)
+                    skip = F.interpolate(skip.half(), size=x[0].shape[2:], mode="nearest").float()
+                x += [skip]
             x = torch.cat(x, 1)
             x = self.convs[("upconv", i, 1)](x)
             if i in self.scales:
