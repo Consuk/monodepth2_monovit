@@ -323,25 +323,30 @@ class Trainer:
             for frame_id in self.opt.frame_ids[1:]:
                 if frame_id == "s":  # stereo frame (not used in mono training)
                     continue
+
                 if self.opt.pose_model_type == "separate_resnet":
-                    # use pose encoder for pair of frames
-                    feats1 = self.models["pose_encoder"](pose_inputs[0])
-                    feats2 = self.models["pose_encoder"](pose_inputs[1])
-                    pose_inputs = [ [f1 + f2 for f1, f2 in zip(feats1, feats2)] ]
-                    axisangle, translation = self.models["pose"](self.models["pose_encoder"](pose_inputs))
+                    # Use two forward passes if encoder is MPViT (3-channel only)
+                    input1 = inputs[("color_aug", 0, 0)]
+                    input2 = inputs[("color_aug", frame_id, 0)]
+                    feat1 = self.models["pose_encoder"](input1)
+                    feat2 = self.models["pose_encoder"](input2)
+                    # Fuse features (e.g., by addition, as in Monodepth2)
+                    fused_feats = [f1 + f2 for f1, f2 in zip(feat1, feat2)]
+                    axisangle, translation = self.models["pose"](fused_feats)
+
+                elif self.opt.pose_model_type == "posecnn":
+                    pose_inputs = torch.cat([inputs[("color", 0, 0)], inputs[("color", frame_id, 0)]], 1)
+                    axisangle, translation = self.models["pose"](pose_inputs)
+
                 else:
-                    if self.opt.pose_model_type == "posecnn":
-                        feats1 = self.models["pose_encoder"](pose_inputs[0])
-                        feats2 = self.models["pose_encoder"](pose_inputs[1])
-                        pose_inputs = [ [f1 + f2 for f1, f2 in zip(feats1, feats2)] ]
-                        axisangle, translation = self.models["pose"](pose_inputs)
-                    else:
-                        # shared encoder: use depth features from frame 0 and frame_id
-                        axisangle, translation = self.models["pose"](features[0], features[frame_id])
+                    # shared encoder: use depth features from frame 0 and frame_id
+                    axisangle, translation = self.models["pose"](features[0], features[frame_id])
+
                 outputs[("axisangle", 0, frame_id)] = axisangle
                 outputs[("translation", 0, frame_id)] = translation
                 outputs[("cam_T_cam", 0, frame_id)] = transformation_from_parameters(
                     axisangle[:, 0], translation[:, 0], invert=(frame_id < 0))
+
         else:
             # If more than two frames, not implemented in this pipeline
             if self.opt.pose_model_type == "posecnn":
@@ -352,6 +357,7 @@ class Trainer:
             else:
                 raise NotImplementedError("Multi-frame pose prediction not implemented")
         return outputs
+
 
     def val(self):
         """Validate the model on a single minibatch from the validation set."""
