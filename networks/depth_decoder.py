@@ -49,7 +49,7 @@ class DepthDecoder(nn.Module):
             x = self.convs[("upconv", i, 0)](x)
             x = [upsample(x)]
 
-            if self.use_skips and i > 1:  # skip i = 1 to save memory
+            if self.use_skips and i > 2:  # skip i = 1 to save memory
                 skip = input_features[i - 1]
                 if skip.shape[2:] != x[0].shape[2:]:
                     skip = F.interpolate(skip, size=x[0].shape[2:], mode="bilinear", align_corners=False)
