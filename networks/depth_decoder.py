@@ -42,19 +42,22 @@ class DepthDecoder(nn.Module):
 
     def forward(self, input_features):
         self.outputs = {}
-
         x = input_features[-1]
+
         for i in range(4, -1, -1):
             x = self.convs[("upconv", i, 0)](x)
             x = [upsample(x)]
+
             if self.use_skips and i > 0:
                 skip = input_features[i - 1]
-                if skip.shape[2:] != x[0].shape[2:]:
-                    skip = F.interpolate(skip, size=x[0].shape[2:], mode="nearest")
+                # Avoid unnecessary casting here
                 x += [skip]
+
             x = torch.cat(x, 1)
             x = self.convs[("upconv", i, 1)](x)
+
             if i in self.scales:
                 self.outputs[("disp", i)] = self.sigmoid(self.convs[("dispconv", i)](x))
 
         return self.outputs
+
