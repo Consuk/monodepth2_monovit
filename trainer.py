@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 import json
 
-from networks.mpvit import mpvit_small
+from networks.mpvit import mpvit_tiny
 from utils import *
 from kitti_utils import *
 from layers import *
@@ -21,14 +21,14 @@ import wandb
 import matplotlib.pyplot as plt
 _DEPTH_COLORMAP = plt.get_cmap('plasma', 256)  # for plotting
 
-from torch.cuda.amp import GradScaler, autocast  
+# from torch.cuda.amp import GradScaler, autocast  
 
 
 
 
 class Trainer:
     def __init__(self, options):
-        self.scaler = GradScaler(enabled=True)
+        # self.scaler = GradScaler(enabled=True)
         self.opt = options
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
 
@@ -54,9 +54,9 @@ class Trainer:
             self.opt.frame_ids.append("s")
 
         # **Depth Encoder**: MPViT (MonoViT) backbone
-        self.models["encoder"] = mpvit_small()  # default in_chans=3 for RGB input
+        self.models["encoder"] = mpvit_tiny()  # default in_chans=3 for RGB input
         # Manually set num_ch_enc based on MPViT output channels (including stem)
-        self.models["encoder"].num_ch_enc = [64, 128, 320, 512, 512]
+        self.models["encoder"].num_ch_enc = [64, 96, 176, 216, 216]
         self.models["depth"] = networks.DepthDecoder(
             self.models["encoder"].num_ch_enc[::-1], self.opt.scales  # reverse here
         )
@@ -72,8 +72,8 @@ class Trainer:
             if self.opt.pose_model_type == "separate_resnet":
                 # Separate pose encoder using MPViT (accepts concatenated pair of images as 6-channel input)
                 pose_enc_channels = 3 * self.num_pose_frames  # e.g., 6 channels for two frames
-                self.models["pose_encoder"] = mpvit_small(in_chans=pose_enc_channels)
-                self.models["pose_encoder"].num_ch_enc = [64, 128, 216, 288, 288]
+                self.models["pose_encoder"] = mpvit_tiny(in_chans=pose_enc_channels)
+                self.models["pose_encoder"].num_ch_enc = [64, 96, 176, 216, 216]
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
                 # Pose decoder takes the pose encoder's feature channels; predict pose for 2 frames (target and one source)
@@ -261,9 +261,9 @@ class Trainer:
         for batch_idx, inputs in enumerate(self.train_loader):
             before_op_time = time.time()
 
-            with autocast():
-                outputs, losses = self.process_batch(inputs)
-                loss = sum(losses.values())
+            # with autocast():
+            outputs, losses = self.process_batch(inputs)
+            loss = sum(losses.values())
 
             self.optimizer.zero_grad()
             self.scaler.scale(loss).backward()
