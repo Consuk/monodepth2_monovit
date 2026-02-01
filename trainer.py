@@ -325,11 +325,15 @@ class Trainer:
                     continue
                 if self.opt.pose_model_type == "separate_resnet":
                     # use pose encoder for pair of frames
-                    pose_inputs = torch.cat([inputs[("color_aug", 0, 0)], inputs[("color_aug", frame_id, 0)]], 1)
+                    feats1 = self.models["pose_encoder"](pose_inputs[0])
+                    feats2 = self.models["pose_encoder"](pose_inputs[1])
+                    pose_inputs = [ [f1 + f2 for f1, f2 in zip(feats1, feats2)] ]
                     axisangle, translation = self.models["pose"](self.models["pose_encoder"](pose_inputs))
                 else:
                     if self.opt.pose_model_type == "posecnn":
-                        pose_inputs = torch.cat([inputs[("color", 0, 0)], inputs[("color", frame_id, 0)]], 1)
+                        feats1 = self.models["pose_encoder"](pose_inputs[0])
+                        feats2 = self.models["pose_encoder"](pose_inputs[1])
+                        pose_inputs = [ [f1 + f2 for f1, f2 in zip(feats1, feats2)] ]
                         axisangle, translation = self.models["pose"](pose_inputs)
                     else:
                         # shared encoder: use depth features from frame 0 and frame_id
