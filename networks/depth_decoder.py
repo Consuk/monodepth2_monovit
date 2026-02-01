@@ -1,11 +1,9 @@
-from __future__ import absolute_import, division, print_function
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
-from layers import *
+from layers import ConvBlock, Conv3x3, upsample
 
 
 class DepthDecoder(nn.Module):
@@ -18,9 +16,8 @@ class DepthDecoder(nn.Module):
         self.scales = scales
 
         self.num_ch_enc = num_ch_enc
-        self.num_ch_dec = np.array([8, 16, 32, 64, 224]) 
+        self.num_ch_dec = np.array([16, 32, 64, 128, 216])  # Adjusted last level to match encoder's final stage
 
-        # decoder
         self.convs = OrderedDict()
         for i in range(4, -1, -1):
             # upconv_0
@@ -29,12 +26,10 @@ class DepthDecoder(nn.Module):
             self.convs[("upconv", i, 0)] = ConvBlock(num_ch_in, num_ch_out)
 
             # upconv_1
+            num_ch_in = self.num_ch_dec[i]
             if self.use_skips and i > 2:
-                num_ch_in = self.num_ch_dec[i] + self.num_ch_enc[i - 1]
-            else:
-                num_ch_in = self.num_ch_dec[i]
-            num_ch_out = self.num_ch_dec[i]
-            self.convs[("upconv", i, 1)] = ConvBlock(num_ch_in, num_ch_out)
+                num_ch_in += self.num_ch_enc[i - 1]
+            self.convs[("upconv", i, 1)] = ConvBlock(num_ch_in, self.num_ch_dec[i])
 
         for s in self.scales:
             self.convs[("dispconv", s)] = Conv3x3(self.num_ch_dec[s], self.num_output_channels)
