@@ -113,8 +113,29 @@ class Trainer:
 
         splits_dir = os.path.join(os.path.dirname(__file__), "splits")
         fpath = os.path.join(splits_dir, self.opt.split, "{}_files.txt")
-        train_filenames = readlines(fpath.format("train"))
-        val_filenames = readlines(fpath.format("val"))
+
+        train_path = fpath.format("train")
+        val_path   = fpath.format("val")
+        test_path  = fpath.format("test")
+
+        train_filenames = readlines(train_path)
+
+        # --- Hamlyn-friendly fallback: if no val_files.txt, use test_files.txt ---
+        if os.path.exists(val_path):
+            val_filenames = readlines(val_path)
+        else:
+            if os.path.exists(test_path):
+                print(f"[split] WARNING: {val_path} not found. Using {test_path} as validation.")
+                val_filenames = readlines(test_path)
+            else:
+                # last fallback: carve a small val split out of train
+                print(f"[split] WARNING: {val_path} and {test_path} not found. Splitting train into train/val.")
+                all_train = train_filenames
+                # simple deterministic split
+                n_val = max(1, int(0.05 * len(all_train)))
+                val_filenames = all_train[:n_val]
+                train_filenames = all_train[n_val:]
+
         img_ext = ".png" if self.opt.png else ".jpg"
 
         num_train_samples = len(train_filenames)
