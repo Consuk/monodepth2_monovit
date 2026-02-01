@@ -52,6 +52,9 @@ class Trainer:
         self.models["encoder"] = mpvit_small()  # default in_chans=3 for RGB input
         # Manually set num_ch_enc based on MPViT output channels (including stem)
         self.models["encoder"].num_ch_enc = [64, 128, 320, 512, 512]
+        self.models["depth"] = networks.DepthDecoder(
+            self.models["encoder"].num_ch_enc[::-1], self.opt.scales  # reverse here
+        )
         self.models["encoder"].to(self.device)
         self.parameters_to_train += list(self.models["encoder"].parameters())
 
