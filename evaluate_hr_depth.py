@@ -146,8 +146,8 @@ def evaluate(opt):
             drop_last=False
         )
 
-        encoder = networks.mpvit_small() #networks.ResnetEncoder(opt.num_layers, False)
-        encoder.num_ch_enc = [64,128,216,288,288]  # = networks.ResnetEncoder(opt.num_layers, False)
+        encoder = networks.mpvit_tiny() #networks.ResnetEncoder(opt.num_layers, False)
+        encoder.num_ch_enc = [64, 96, 176, 216]  # = networks.ResnetEncoder(opt.num_layers, False)
         depth_decoder = networks.DepthDecoder(
             encoder.num_ch_enc,
             scales=range(4)  # This matches how it's constructed in your training

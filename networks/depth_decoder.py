@@ -30,10 +30,8 @@ class DepthDecoder(nn.Module):
 
             # upconv_1
             num_ch_in = self.num_ch_dec[i]
-            # Match skip policy in forward(): only include skip features for i > 2
-            if self.use_skips and i > 2:
+            if self.use_skips and i > 2:  # skip connection only for i > 2
                 num_ch_in += self.num_ch_enc[i - 1]
-
             num_ch_out = self.num_ch_dec[i]
             self.convs[("upconv", i, 1)] = ConvBlock(num_ch_in, num_ch_out)
 
@@ -51,7 +49,7 @@ class DepthDecoder(nn.Module):
             x = self.convs[("upconv", i, 0)](x)
             x = [upsample(x)]
 
-            if self.use_skips and i > 2:  # skip i = 1 to save memory
+            if self.use_skips and i > 2:
                 skip = input_features[i - 1]
                 if skip.shape[2:] != x[0].shape[2:]:
                     skip = F.interpolate(skip, size=x[0].shape[2:], mode="bilinear", align_corners=False)
