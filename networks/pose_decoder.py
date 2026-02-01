@@ -23,7 +23,10 @@ class PoseDecoder(nn.Module):
         self.num_frames_to_predict_for = num_frames_to_predict_for
 
         self.convs = OrderedDict()
-        self.convs[("squeeze")] = nn.Conv2d(self.num_ch_enc[-1], 256, 1)
+        # self.convs[("squeeze")] = nn.Conv2d(self.num_ch_enc[-1], 256, 1) # scared
+        pose_input_channels = self.num_ch_enc[-1] # hamlyn 
+        self.convs[("squeeze")] = nn.Conv2d(pose_input_channels, 256, 1) # hamlyn
+
         self.convs[("pose", 0)] = nn.Conv2d(num_input_features * 256, 256, 3, stride, 1)
         self.convs[("pose", 1)] = nn.Conv2d(256, 256, 3, stride, 1)
         self.convs[("pose", 2)] = nn.Conv2d(256, 6 * num_frames_to_predict_for, 1)
