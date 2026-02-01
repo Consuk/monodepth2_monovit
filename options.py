@@ -1,16 +1,9 @@
-# Copyright Niantic 2019. Patent Pending. All rights reserved.
-#
-# This software is licensed under the terms of the Monodepth2 licence
-# which allows for non-commercial use only, the full terms of which are made
-# available in the LICENSE file.
-
 from __future__ import absolute_import, division, print_function
 
 import os
 import argparse
 
 file_dir = os.path.dirname(__file__)  # the directory that options.py resides in
-
 
 class MonodepthOptions:
     def __init__(self):
@@ -28,14 +21,13 @@ class MonodepthOptions:
 
         # TRAINING options
         self.parser.add_argument("--model_name",
-                                   type=str,
-                                   help="the name of the folder to save the model in",
-                                   default="monovit_mdp")
-
+                                 type=str,
+                                 help="the name of the folder to save the model in",
+                                 default="monovit_mdp")
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark","endovis", "hamlyn"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "endovis", "hamlyn"],
                                  default="eigen_zhou")
         self.parser.add_argument("--num_layers",
                                  type=int,
@@ -46,18 +38,18 @@ class MonodepthOptions:
                                  type=str,
                                  help="dataset to train on",
                                  default="endovis",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test","endovis", "hamlyn"])
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "endovis", "hamlyn"])
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")
         self.parser.add_argument("--height",
                                  type=int,
                                  help="input image height",
-                                 default=320)
+                                 default=256)
         self.parser.add_argument("--width",
                                  type=int,
                                  help="input image width",
-                                 default=256)
+                                 default=320)
         self.parser.add_argument("--disparity_smoothness",
                                  type=float,
                                  help="disparity smoothness weight",
@@ -174,8 +166,8 @@ class MonodepthOptions:
                                  help="if set disables median scaling in evaluation",
                                  action="store_true")
         self.parser.add_argument("--pred_depth_scale_factor",
-                                 help="if set multiplies predictions by this number",
                                  type=float,
+                                 help="if set multiplies predictions by this number",
                                  default=1)
         self.parser.add_argument("--ext_disp_to_eval",
                                  type=str,
@@ -183,7 +175,7 @@ class MonodepthOptions:
         self.parser.add_argument("--eval_split",
                                  type=str,
                                  default="SERV-CT",
-                                 choices=["eigen", "eigen_benchmark", "benchmark", "odom_9", "odom_10","endovis","hamlyn","SERV-CT"],
+                                 choices=["eigen", "eigen_benchmark", "benchmark", "odom_9", "odom_10", "endovis", "hamlyn", "SERV-CT"],
                                  help="which split to run eval on")
         self.parser.add_argument("--save_pred_disps",
                                  help="if set saves predicted disparities",
@@ -192,16 +184,34 @@ class MonodepthOptions:
                                  help="if set disables evaluation",
                                  action="store_true")
         self.parser.add_argument("--eval_eigen_to_benchmark",
-                                 help="if set assume we are loading eigen results from npy but "
-                                      "we want to evaluate using the new benchmark.",
+                                 help="if set, assume we are loading eigen results from npy but want to evaluate with KITTI benchmark crop.",
                                  action="store_true")
         self.parser.add_argument("--eval_out_dir",
-                                 help="if set will output the disparities to this folder",
-                                 type=str)
+                                 type=str,
+                                 help="if set will output the disparities to this folder")
         self.parser.add_argument("--post_process",
-                                 help="if set will perform the flipping post processing "
-                                      "from the original monodepth paper",
+                                 help="if set will perform flipping post-processing as in Monodepth v1",
                                  action="store_true")
+        # EXTRA: TRAIN-TIME EVALUATION
+        self.parser.add_argument("--eval_each_epoch",
+                                 help="if set, runs evaluation at the end of every epoch (if ground truth available)",
+                                 action="store_true")
+        self.parser.add_argument("--eval_batch_size",
+                                 type=int,
+                                 help="batch size used for evaluation",
+                                 default=16)
+        self.parser.add_argument("--eval_weights_subfolder",
+                                 type=str,
+                                 help="relative subfolder under log_dir/model_name where weights are saved",
+                                 default="models/weights")
+        # EXTRA: HAMLYN STRICT NEIGHBORS
+        self.parser.add_argument("--hamlyn_strict_neighbors",
+                                 help="if set, for Hamlyn dataset use nearest neighbor frame when a frame is missing",
+                                 action="store_true")
+        self.parser.add_argument("--neighbor_search_max",
+                                 type=int,
+                                 help="max +/- frame index to search for neighbor when strict neighbor mode is enabled",
+                                 default=10)
 
     def parse(self):
         self.options = self.parser.parse_args()

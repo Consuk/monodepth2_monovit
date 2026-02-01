@@ -1,17 +1,11 @@
-# Copyright Niantic 2021. Patent Pending. All rights reserved.
-#
-# This software is licensed under the terms of the ManyDepth licence
-# which allows for non-commercial use only, the full terms of which are made
-# available in the LICENSE file.
-
 import os
 import random
-os.environ["MKL_NUM_THREADS"] = "1"  # noqa F402
-os.environ["NUMEXPR_NUM_THREADS"] = "1"  # noqa F402
-os.environ["OMP_NUM_THREADS"] = "1"  # noqa F402
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 import numpy as np
-from PIL import Image  # using pillow-simd for increased speed
+from PIL import Image
 import cv2
 
 import torch
@@ -20,18 +14,13 @@ from torchvision import transforms
 
 cv2.setNumThreads(0)
 
-
 def pil_loader(path):
-    # open path as file to avoid ResourceWarning
-    # (https://github.com/python-pillow/Pillow/issues/835)
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         with Image.open(f) as img:
-            return img.convert('RGB')
-
+            return img.convert("RGB")
 
 class MonoDataset(data.Dataset):
-    """Superclass for monocular dataloaders
-    """
+    """Superclass for monocular dataset loaders"""
     def __init__(self,
                  data_path,
                  filenames,
@@ -40,10 +29,8 @@ class MonoDataset(data.Dataset):
                  frame_idxs,
                  num_scales,
                  is_train=False,
-                 img_ext='.jpg',
-                 ):
+                 img_ext=".jpg"):
         super(MonoDataset, self).__init__()
-
         self.data_path = data_path
         self.filenames = filenames
         self.height = height
@@ -51,161 +38,130 @@ class MonoDataset(data.Dataset):
         self.num_scales = num_scales
 
         self.interp = Image.Resampling.LANCZOS
-
         self.frame_idxs = frame_idxs
-
         self.is_train = is_train
         self.img_ext = img_ext
 
         self.loader = pil_loader
         self.to_tensor = transforms.ToTensor()
 
-        # We need to specify augmentations differently in newer versions of torchvision.
-        # We first try the newer tuple version; if this fails we fall back to scalars
+        # Hamlyn neighbor search parameters (set via dataset subclass if applicable)
+        self.strict_neighbors = getattr(self, "strict_neighbors", False)
+        self.neighbor_search_max = int(getattr(self, "neighbor_search_max", 10))
+
+        # Setup color jitter augmentation
         try:
             self.brightness = (0.8, 1.2)
             self.contrast = (0.8, 1.2)
             self.saturation = (0.8, 1.2)
             self.hue = (-0.1, 0.1)
-            transforms.ColorJitter.get_params(
-                self.brightness, self.contrast, self.saturation, self.hue)
+            transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
         except TypeError:
+            # Older torchvision versions use scalar values
             self.brightness = 0.2
             self.contrast = 0.2
             self.saturation = 0.2
             self.hue = 0.1
 
+        # Precompute resized image transforms for each scale
         self.resize = {}
         for i in range(self.num_scales):
             s = 2 ** i
-            self.resize[i] = transforms.Resize((self.height // s, self.width // s),
-                                               interpolation=self.interp)
+            self.resize[i] = transforms.Resize((self.height // s, self.width // s), interpolation=self.interp)
 
         self.load_depth = self.check_depth()
 
     def preprocess(self, inputs, color_aug):
-        """Resize colour images to the required scales and augment if required
-
-        We create the color_aug object in advance and apply the same augmentation to all
-        images in this item. This ensures that all images input to the pose network receive the
-        same augmentation.
-        """
+        """Resize color images to required scales and apply data augmentation."""
         for k in list(inputs):
             if "color" in k:
-                n, im, i = k
+                n, img_id, intr = k
+                # resize original (scale -1) to all scales
                 for i in range(self.num_scales):
-                    inputs[(n, im, i)] = self.resize[i](inputs[(n, im, i - 1)])
-
+                    inputs[(n, img_id, i)] = self.resize[i](inputs[(n, img_id, i - 1)])
         for k in list(inputs):
             f = inputs[k]
             if "color" in k:
-                n, im, i = k
-                inputs[(n, im, i)] = self.to_tensor(f)
-                # check it isn't a blank frame - keep _aug as zeros so we can check for it
-                if inputs[(n, im, i)].sum() == 0:
-                    inputs[(n + "_aug", im, i)] = inputs[(n, im, i)]
+                n, img_id, i = k
+                inputs[(n, img_id, i)] = self.to_tensor(f)
+                if inputs[(n, img_id, i)].sum() == 0:
+                    inputs[(n + "_aug", img_id, i)] = inputs[(n, img_id, i)]
                 else:
-                    inputs[(n + "_aug", im, i)] = self.to_tensor(color_aug(f))
+                    inputs[(n + "_aug", img_id, i)] = self.to_tensor(color_aug(f))
 
     def __len__(self):
         return len(self.filenames)
 
     def load_intrinsics(self, folder, frame_index):
+        # Default behavior: return constant intrinsics matrix (to be overridden by dataset subclasses)
         return self.K.copy()
 
-    def __getitem__(self, index):
-        """Returns a single training item from the dataset as a dictionary.
-
-        Values correspond to torch tensors.
-        Keys in the dictionary are either strings or tuples:
-
-            ("color", <frame_id>, <scale>)          for raw colour images,
-            ("color_aug", <frame_id>, <scale>)      for augmented colour images,
-            ("K", scale) or ("inv_K", scale)        for camera intrinsics,
-            "depth_gt"                              for ground truth depth maps
-
-        <frame_id> is:
-            an integer (e.g. 0, -1, or 1) representing the temporal step relative to 'index',
-
-        <scale> is an integer representing the scale of the image relative to the fullsize image:
-            -1      images at native resolution as loaded from disk
-            0       images resized to (self.width,      self.height     )
-            1       images resized to (self.width // 2, self.height // 2)
-            2       images resized to (self.width // 4, self.height // 4)
-            3       images resized to (self.width // 8, self.height // 8)
+    def _hamlyn_find_nearest_existing_frame(self, folder, frame_index, side):
         """
-        inputs = {}
+        For Hamlyn: if a neighbor frame is missing, find the nearest frame index that exists on disk.
+        """
+        # Direct attempt
+        p0 = self.get_image_path(folder, frame_index, side)
+        if os.path.exists(p0):
+            return frame_index
+        # Search outward
+        for d in range(1, self.neighbor_search_max + 1):
+            for cand in (frame_index + d, frame_index - d):
+                p = self.get_image_path(folder, cand, side)
+                if os.path.exists(p):
+                    return cand
+        return None
 
-        #do_color_aug = self.is_train and random.random() > 0.5
-        #do_flip = self.is_train and random.random() > 0.5
+    def __getitem__(self, index):
+        inputs = {}
         do_flip = False
         do_color_aug = False
+
         folder, frame_index, side = self.index_to_folder_and_frame_idx(index)
 
-        poses = {}
-        # In the original Monodepth2 implementation, each training sample is composed of a
-        # reference frame (frame_index) and its neighbouring frames (frame_index ± i). Here
-        # we restore this behaviour: for each entry in frame_idxs, if the entry is a string
-        # "s" we load the stereo counterpart (other side), otherwise we load the colour
-        # image offset by the temporal index. We wrap the call in a try/except to handle
-        # missing frames gracefully by using a dummy image for non-reference frames. This
-        # ensures that training can proceed when a sequence begins or ends.
-        if type(self).__name__ in ["CityscapesPreprocessedDataset", "CityscapesEvalDataset"]:
-            inputs.update(self.get_colors(folder, frame_index, side, do_flip))
-        else:
-            for i in self.frame_idxs:
-                if i == "s":
-                    # load the opposite stereo view
-                    other_side = {"r": "l", "l": "r"}[side]
-                    inputs[("color", i, -1)] = self.get_color(
-                        folder, frame_index, other_side, do_flip)
-                else:
-                    try:
-                        # load neighbouring frame at offset i (e.g., -1, 0, +1)
-                        inputs[("color", i, -1)] = self.get_color(
-                            folder, frame_index + i, side, do_flip)
-                    except FileNotFoundError as e:
-                        if i != 0:
-                            # If neighbour frame is missing, fill with a blank image to
-                            # avoid breaking the pipeline. Pose estimation for this frame
-                            # will be skipped by assigning None.
-                            inputs[("color", i, -1)] = Image.fromarray(
-                                np.zeros((100, 100, 3), dtype=np.uint8))
-                            poses[i] = None
+        # Load images for each required frame
+        for i in self.frame_idxs:
+            if i == "s":
+                # stereo: load opposite side frame at same index
+                other_side = {"l": "r", "r": "l"}[side]
+                inputs[("color", i, -1)] = self.get_color(folder, frame_index, other_side, do_flip)
+            else:
+                target_index = frame_index + i
+                try:
+                    inputs[("color", i, -1)] = self.get_color(folder, target_index, side, do_flip)
+                except FileNotFoundError as e:
+                    # Hamlyn neighbor snapping if enabled
+                    is_hamlyn = type(self).__name__ == "HamlynDataset"
+                    if is_hamlyn and self.strict_neighbors and i != 0:
+                        nearest = self._hamlyn_find_nearest_existing_frame(folder, target_index, side)
+                        if nearest is not None:
+                            inputs[("color", i, -1)] = self.get_color(folder, nearest, side, do_flip)
                         else:
-                            # If the reference frame itself is missing, raise an error
-                            raise FileNotFoundError(
-                                f'Cannot find frame - make sure your --data_path is set correctly, '
-                                f'or try adding the --png flag. {e}')
+                            inputs[("color", i, -1)] = Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8))
+                    else:
+                        if i != 0:
+                            inputs[("color", i, -1)] = Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8))
+                        else:
+                            raise FileNotFoundError(f"Cannot find frame - check data path and split files: {e}")
 
-        # adjusting intrinsics to match each scale in the pyramid
+        # Prepare intrinsics for each scale
         for scale in range(self.num_scales):
             K = self.load_intrinsics(folder, frame_index)
-
             K[0, :] *= self.width // (2 ** scale)
             K[1, :] *= self.height // (2 ** scale)
-
             inv_K = np.linalg.pinv(K)
-
             inputs[("K", scale)] = torch.from_numpy(K)
             inputs[("inv_K", scale)] = torch.from_numpy(inv_K)
 
-        if do_color_aug:
-            color_aug = transforms.ColorJitter(self.brightness, self.contrast, self.saturation, self.hue)
-        else:
-            color_aug = (lambda x: x)
-
+        # Apply data augmentation (if any)
+        color_aug = (lambda x: x) if not do_color_aug else transforms.ColorJitter(
+            self.brightness, self.contrast, self.saturation, self.hue)
         self.preprocess(inputs, color_aug)
 
+        # Remove original PIL images to save memory
         for i in self.frame_idxs:
             del inputs[("color", i, -1)]
             del inputs[("color_aug", i, -1)]
-
-        if self.load_depth and False:
-            depth_gt = self.get_depth(folder, frame_index, side, do_flip)
-            inputs["depth_gt"] = np.expand_dims(depth_gt, 0)
-            inputs["depth_gt"] = torch.from_numpy(inputs["depth_gt"].astype(np.float32))
-
         return inputs
 
     def get_color(self, folder, frame_index, side, do_flip):
