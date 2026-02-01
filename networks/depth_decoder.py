@@ -48,10 +48,11 @@ class DepthDecoder(nn.Module):
             x = self.convs[("upconv", i, 0)](x)
             x = [upsample(x)]
 
-            if self.use_skips and i > 0:
-                skip = input_features[i - 1]
-                skip = F.interpolate(skip, size=x[0].shape[2:], mode="nearest")
-                x += [skip]
+            skip = input_features[i - 1]
+            # Only interpolate if spatial sizes differ significantly (to avoid huge upsampling)
+            if skip.shape[2:] != x[0].shape[2:]:
+                skip = F.interpolate(skip, size=x[0].shape[2:], mode="bilinear", align_corners=False)
+            x += [skip]
 
             x = torch.cat(x, 1)
             x = self.convs[("upconv", i, 1)](x)
