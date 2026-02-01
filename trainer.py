@@ -328,13 +328,11 @@ class Trainer:
                     continue
 
                 if self.opt.pose_model_type == "separate_resnet":
-                    # Use two forward passes if encoder is MPViT (3-channel only)
-                    input1 = inputs[("color_aug", 0, 0)]
-                    input2 = inputs[("color_aug", frame_id, 0)]
-                    feat1 = self.models["pose_encoder"](input1)
-                    feat2 = self.models["pose_encoder"](input2)
-                    # Fuse features (e.g., by addition, as in Monodepth2)
-                    fused_feats = [f1 + f2 for f1, f2 in zip(feat1, feat2)]
+                    input1 = inputs[("color", 0, 0)]
+                    input2 = inputs[("color", frame_id, 0)]
+                    pose_inputs = torch.cat([input1, input2], dim=1)  # (B, 6, H, W)
+                    axisangle, translation = self.models["pose"](pose_inputs)
+
                     axisangle, translation = self.models["pose"](fused_feats)
 
                 elif self.opt.pose_model_type == "posecnn":
