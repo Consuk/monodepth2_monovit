@@ -29,11 +29,12 @@ class DepthDecoder(nn.Module):
             self.convs[("upconv", i, 0)] = ConvBlock(num_ch_in, num_ch_out)
 
             # upconv_1
-            num_ch_in = self.num_ch_dec[i]
-            if self.use_skips and i > 2:  # skip connection only for i > 2
-                num_ch_in += self.num_ch_enc[i - 1]
+            if i > 2 and self.use_skips:
+                num_ch_in = self.num_ch_dec[i] + self.num_ch_enc[i - 1]
+            else:
+                num_ch_in = self.num_ch_dec[i]
             num_ch_out = self.num_ch_dec[i]
-            self.convs[("upconv", i, 1)] = ConvBlock(num_ch_in, num_ch_out)
+
 
         for s in self.scales:
             self.convs[("dispconv", s)] = Conv3x3(self.num_ch_dec[s], self.num_output_channels)
