@@ -22,7 +22,7 @@ import wandb
 import matplotlib.pyplot as plt
 _DEPTH_COLORMAP = plt.get_cmap('plasma', 256)  # for plotting
 
-from torch.cuda.amp import GradScaler, autocast  
+from torch.amp import GradScaler, autocast  
 
 
 
@@ -266,10 +266,11 @@ class Trainer:
                 outputs, losses = self.process_batch(inputs)
                 loss = sum(losses.values())
 
-            self.optimizer.zero_grad()
+            self.model_optimizer.zero_grad()
             self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
+            self.scaler.step(self.model_optimizer)
             self.scaler.update()
+
 
 
             duration = time.time() - before_op_time
