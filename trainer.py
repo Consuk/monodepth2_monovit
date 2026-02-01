@@ -22,7 +22,7 @@ import wandb
 import matplotlib.pyplot as plt
 _DEPTH_COLORMAP = plt.get_cmap('plasma', 256)  # for plotting
 
-from torch.amp import GradScaler, autocast  
+from torch.cuda.amp import GradScaler, autocast  
 
 
 
