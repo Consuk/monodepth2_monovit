@@ -175,7 +175,7 @@ class Trainer:
         self.num_total_steps = len(train_filenames) // self.opt.batch_size * self.opt.num_epochs
 
         dataset_dict = {
-            "endovis": datasets.EndovisDataset,
+            "endovis": datasets.SCAREDDataset,
             "hamlyn": datasets.HamlynDataset,
         }
         self.dataset = dataset_dict[self.opt.dataset]
