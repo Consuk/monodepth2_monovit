@@ -44,6 +44,20 @@ def disp_to_depth(disp, min_depth, max_depth):
     depth = 1 / scaled_disp
     return scaled_disp, depth
 
+
+def infer_num_ch_enc(encoder, in_chans, device, hw=(64, 64)):
+    was_training = encoder.training
+    encoder.eval()
+    with torch.no_grad():
+        x = torch.zeros(1, in_chans, hw[0], hw[1], device=device)
+        feats = encoder(x)
+    if was_training:
+        encoder.train()
+    if not isinstance(feats, (list, tuple)) or len(feats) == 0:
+        raise ValueError(f"Unexpected encoder outputs type={type(feats)}")
+    return [f.shape[1] for f in feats]
+
+
 def compute_errors(gt, pred):
     """Computation of error metrics between predicted and ground truth depths
     """
@@ -147,8 +161,8 @@ def evaluate(opt):
             drop_last=False
         )
 
-        encoder = mpvit_tiny()  # MPViT-tiny encoder
-        encoder.num_ch_enc = [64, 64, 96, 176, 216]  # = networks.ResnetEncoder(opt.num_layers, False)
+        encoder = mpvit_tiny()  # MPViT-Tiny encoder (matches training)
+        encoder.num_ch_enc = infer_num_ch_enc(encoder, in_chans=3, device=device)
         depth_decoder = networks.DepthDecoder(
             encoder.num_ch_enc,
             scales=range(4)  # This matches how it's constructed in your training

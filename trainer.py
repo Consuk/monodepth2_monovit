@@ -1,4 +1,5 @@
 from __future__ import absolute_import, division, print_function
+from pyexpat import features
 
 import numpy as np
 import time
@@ -24,6 +25,23 @@ _DEPTH_COLORMAP = plt.get_cmap('plasma', 256)  # for plotting
 from torch.cuda.amp import GradScaler, autocast  
 
 
+
+
+
+def infer_num_ch_enc(encoder, in_chans, device, hw=(64, 64)):
+    """Infer encoder output channel dims by running a tiny dummy forward.
+    This avoids hardcoding MPViT channel lists and prevents decoder mismatches.
+    """
+    was_training = encoder.training
+    encoder.eval()
+    with torch.no_grad():
+        x = torch.zeros(1, in_chans, hw[0], hw[1], device=device)
+        feats = encoder(x)
+    if was_training:
+        encoder.train()
+    if not isinstance(feats, (list, tuple)) or len(feats) == 0:
+        raise ValueError(f"Unexpected encoder outputs type={type(feats)}")
+    return [f.shape[1] for f in feats]
 
 
 class Trainer:
@@ -55,11 +73,8 @@ class Trainer:
 
         # **Depth Encoder**: MPViT (MonoViT) backbone
         self.models["encoder"] = mpvit_tiny()  # default in_chans=3 for RGB input
-        # Manually set num_ch_enc based on MPViT output channels (including stem)
-        self.models["encoder"].num_ch_enc = [64, 64, 96, 176, 216]
-        self.models["depth"] = networks.DepthDecoder(
-            self.models["encoder"].num_ch_enc, self.opt.scales  
-        )
+        self.models["encoder"].num_ch_enc = infer_num_ch_enc(self.models["encoder"], in_chans=3, device=self.device)
+        self.models["depth"] = networks.DepthDecoder(self.models["encoder"].num_ch_enc, self.opt.scales)
         self.models["encoder"].to(self.device)
         self.parameters_to_train += list(self.models["encoder"].parameters())
 
@@ -73,7 +88,7 @@ class Trainer:
                 # Separate pose encoder using MPViT (accepts concatenated pair of images as 6-channel input)
                 pose_enc_channels = 3 * self.num_pose_frames  # e.g., 6 channels for two frames
                 self.models["pose_encoder"] = mpvit_tiny(in_chans=pose_enc_channels)
-                self.models["pose_encoder"].num_ch_enc = [64, 64, 96, 176, 216]
+                self.models["pose_encoder"].num_ch_enc = infer_num_ch_enc(self.models["pose_encoder"], in_chans=pose_enc_channels, device=self.device)
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
                 # Pose decoder takes the pose encoder's feature channels; predict pose for 2 frames (target and one source)
@@ -263,12 +278,13 @@ class Trainer:
 
             with autocast():
                 outputs, losses = self.process_batch(inputs)
-                loss = losses["loss"]
+                loss = sum(losses.values())
 
-            self.model_optimizer.zero_grad(set_to_none=True)
+            self.model_optimizer.zero_grad()
             self.scaler.scale(loss).backward()
             self.scaler.step(self.model_optimizer)
             self.scaler.update()
+
 
 
             duration = time.time() - before_op_time
@@ -305,7 +321,9 @@ class Trainer:
         else:
             # Separate encoder (or no pose net): only use frame 0 for depth
             features = self.models["encoder"](inputs[("color_aug", 0, 0)])
-            outputs = self.models["depth"](features)
+            features = features[::-1]  # Reverse for top-down decoder order
+            with autocast():
+                outputs = self.models["depth"](features)
 
 
         # If predictive masking is used, compute mask
