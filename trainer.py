@@ -175,10 +175,6 @@ class Trainer:
         self.num_total_steps = len(train_filenames) // self.opt.batch_size * self.opt.num_epochs
 
         dataset_dict = {
-            "kitti": datasets.KITTIRAWDataset,
-            "kitti_odom": datasets.KITTIOdomDataset,
-            "kitti_depth": datasets.KITTIDepthDataset,
-            "kitti_test": datasets.KITTITestDataset,
             "endovis": datasets.EndovisDataset,
             "hamlyn": datasets.HamlynDataset,
         }
