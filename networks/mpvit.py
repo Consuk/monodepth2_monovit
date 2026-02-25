@@ -1,844 +1,548 @@
-# --------------------------------------------------------------------------------
-# MPViT: Multi-Path Vision Transformer for Dense Prediction
-# Copyright (c) 2022 Electronics and Telecommunications Research Institute (ETRI).
-# All Rights Reserved.
-# Written by Youngwan Lee
-# This source code is licensed(Dual License(GPL3.0 & Commercial)) under the license found in the
-# LICENSE file in the root directory of this source tree.
-# --------------------------------------------------------------------------------
-# References:
-# timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
-# CoaT: https://github.com/mlpc-ucsd/CoaT
-# --------------------------------------------------------------------------------
+from __future__ import absolute_import, division, print_function
 
+import os
+import time
+import json
+import subprocess
+from collections import OrderedDict
 
 import numpy as np
-import math
-import logging
+
 import torch
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader
 
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.models.layers import DropPath, trunc_normal_
+import datasets
+import networks
+import wandb
 
-from einops import rearrange
-from functools import partial
-from torch import nn, einsum
-from torch.nn.modules.batchnorm import _BatchNorm
-#from mmcv.utils import load_checkpoint,load_state_dict
+from layers import SSIM, BackprojectDepth, Project3D, disp_to_depth, get_smooth_loss
+from utils import readlines, normalize_image, sec_to_hm_str
+
+
+# -------------------------
+# AMP compatibility (torch 1.x / 2.x)
+# -------------------------
 try:
-    from mmengine.runner.checkpoint import load_checkpoint, load_state_dict
-except Exception:
-    load_checkpoint = None
-    def load_state_dict(*args, **kwargs):
-        # fallback dummy: no hace nada si no se usan pesos preentrenados
-        return
-
-try:
-    from mmcv.cnn import build_norm_layer
-except Exception:
-    import torch.nn as nn
-    def build_norm_layer(cfg, out_ch):
-        # fallback simple si no hay mmcv: BN2d por defecto
-        return 'bn', nn.BatchNorm2d(out_ch)
+    from torch.cuda.amp import autocast, GradScaler  # torch<=1.13
+except Exception:  # pragma: no cover
+    from torch.amp import autocast, GradScaler  # torch>=2.0
 
 
-#from mmseg.utils import get_root_logger
-#from mmseg.utils import get_root_logger
-#from mmcv.utils import get_logger
-
-#mmdet.utils.logger
-#from mmcv.utils import get_logger
-#from mmdet.utils import get_root_logger
-#from mmseg.models.builder import BACKBONES
-#from mmcv.cnn.backbones import BACKBONES
-
-
-__all__ = [
-    "mpvit_tiny",
-    "mpvit_xsmall",
-    "mpvit_small",
-    "mpvit_base",
-]
-
-def _cfg_mpvit(url="", **kwargs):
-    return {
-        "url": url,
-        "num_classes": 1000,
-        "input_size": (3, 224, 224),
-        "pool_size": None,
-        "crop_pct": 0.9,
-        "interpolation": "bicubic",
-        "mean": IMAGENET_DEFAULT_MEAN,
-        "std": IMAGENET_DEFAULT_STD,
-        "first_conv": "patch_embed.proj",
-        "classifier": "head",
-        **kwargs,
-    }
-
-
-class Mlp(nn.Module):
-    """Feed-forward network (FFN, a.k.a. MLP) class."""
-
-    def __init__(
-        self,
-        in_features,
-        hidden_features=None,
-        out_features=None,
-        act_layer=nn.GELU,
-        drop=0.0,
-    ):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
-        self.drop = nn.Dropout(drop)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
-
-
-class Conv2d_BN(nn.Module):
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        kernel_size=1,
-        stride=1,
-        pad=0,
-        dilation=1,
-        groups=1,
-        bn_weight_init=1,
-        act_layer=None,
-        norm_cfg=dict(type="BN"),
-    ):
-        super().__init__()
-        # self.add_module('c', torch.nn.Conv2d(
-        #     a, b, ks, stride, pad, dilation, groups, bias=False))
-        self.conv = torch.nn.Conv2d(
-            in_ch, out_ch, kernel_size, stride, pad, dilation, groups, bias=False
-        )
-        self.bn = build_norm_layer(norm_cfg, out_ch)[1]
-
-        torch.nn.init.constant_(self.bn.weight, bn_weight_init)
-        torch.nn.init.constant_(self.bn.bias, 0)
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                # Note that there is no bias due to BN
-                fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(mean=0.0, std=np.sqrt(2.0 / fan_out))
-
-        self.act_layer = act_layer() if act_layer is not None else nn.Identity()
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        x = self.act_layer(x)
-
-        return x
-
-
-class DWConv2d_BN(nn.Module):
+def infer_num_ch_enc(encoder, in_chans, height, width, device):
     """
-    Depthwise Separable Conv
+    Forward a dummy tensor through the encoder to infer the feature-channel sizes.
+    This is robust for custom backbones (e.g., MPViT) where num_ch_enc isn't fixed.
     """
-
-    def __init__(
-        self,
-        in_ch,
-        out_ch,
-        kernel_size=1,
-        stride=1,
-        norm_layer=nn.BatchNorm2d,
-        act_layer=nn.Hardswish,
-        bn_weight_init=1,
-        norm_cfg=dict(type="BN"),
-    ):
-        super().__init__()
-
-        # dw
-        self.dwconv = nn.Conv2d(
-            in_ch,
-            out_ch,
-            kernel_size,
-            stride,
-            (kernel_size - 1) // 2,
-            groups=out_ch,
-            bias=False,
-        )
-        # pw-linear
-        self.pwconv = nn.Conv2d(out_ch, out_ch, 1, 1, 0, bias=False)
-        self.bn = build_norm_layer(norm_cfg, out_ch)[1]
-        self.act = act_layer() if act_layer is not None else nn.Identity()
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2.0 / n))
-                if m.bias is not None:
-                    m.bias.data.zero_()
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(bn_weight_init)
-                m.bias.data.zero_()
-
-    def forward(self, x):
-
-        x = self.dwconv(x)
-        x = self.pwconv(x)
-        x = self.bn(x)
-        x = self.act(x)
-
-        return x
+    encoder.eval()
+    with torch.no_grad():
+        x = torch.zeros(1, in_chans, height, width, device=device)
+        feats = encoder(x)
+        if not isinstance(feats, (list, tuple)):
+            raise RuntimeError(
+                "Encoder forward must return a list/tuple of feature maps. "
+                f"Got type={type(feats)}")
+        chs = [int(f.shape[1]) for f in feats]
+    return chs
 
 
-class DWCPatchEmbed(nn.Module):
-    """
-    Depthwise Convolutional Patch Embedding layer
-    Image to Patch Embedding
-    """
+class Trainer:
+    def __init__(self, options):
+        self.opt = options
+        self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
 
-    def __init__(
-        self,
-        in_chans=3,
-        embed_dim=768,
-        patch_size=16,
-        stride=1,
-        pad=0,
-        act_layer=nn.Hardswish,
-        norm_cfg=dict(type="BN"),
-    ):
-        super().__init__()
+        # Ensure input dimensions are multiples of 32 (required by decoder pyramid)
+        assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
+        assert self.opt.width % 32 == 0, "'width' must be a multiple of 32"
 
-        # TODO : confirm whether act_layer is effective or not
-        self.patch_conv = DWConv2d_BN(
-            in_chans,
-            embed_dim,
-            kernel_size=patch_size,
-            stride=stride,
-            act_layer=nn.Hardswish,
-            norm_cfg=norm_cfg,
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda")
+        self.num_scales = len(self.opt.scales)
+        self.num_input_frames = len(self.opt.frame_ids)
+        self.num_pose_frames = 2 if self.opt.pose_model_input == "pairs" else self.num_input_frames
+
+        self.models = {}
+        self.parameters_to_train = []
+        self.scaler = GradScaler(enabled=(self.device.type == "cuda"))
+
+        # -------------------------
+        # MODELS
+        # -------------------------
+        # Encoder: MPViT tiny (monovit)
+        self.models["encoder"] = networks.mpvit_tiny(in_chans=3)
+        self.models["encoder"].to(self.device)
+
+        # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
+        self.models["encoder"].num_ch_enc = infer_num_ch_enc(
+            self.models["encoder"], in_chans=3,
+            height=self.opt.height, width=self.opt.width,
+            device=self.device
         )
 
-    def forward(self, x):
-        x = self.patch_conv(x)
-
-        return x
-
-
-class Patch_Embed_stage(nn.Module):
-    def __init__(self, embed_dim, num_path=4, isPool=False, norm_cfg=dict(type="BN")):
-        super(Patch_Embed_stage, self).__init__()
-
-        self.patch_embeds = nn.ModuleList(
-            [
-                DWCPatchEmbed(
-                    in_chans=embed_dim,
-                    embed_dim=embed_dim,
-                    patch_size=3,
-                    stride = 2 if isPool else 1,
-                    pad=1,
-                    norm_cfg=norm_cfg,
-                )
-                for idx in range(num_path)
-            ]
+        # Depth decoder
+        self.models["depth"] = networks.DepthDecoder(
+            self.models["encoder"].num_ch_enc,
+            self.opt.scales
         )
+        self.models["depth"].to(self.device)
 
-        # scale
+        # Pose network
+        if self.opt.pose_model_type == "separate_resnet":
+            # MPViT pose encoder over concatenated (target, source) -> 6 channels
+            self.models["pose_encoder"] = networks.mpvit_tiny(in_chans=6)
+            self.models["pose_encoder"].to(self.device)
+            self.models["pose_encoder"].num_ch_enc = infer_num_ch_enc(
+                self.models["pose_encoder"], in_chans=6,
+                height=self.opt.height, width=self.opt.width,
+                device=self.device
+            )
+            self.models["pose"] = networks.PoseDecoder(
+                self.models["pose_encoder"].num_ch_enc,
+                num_input_features=1,
+                num_frames_to_predict_for=2
+            )
+            self.models["pose"].to(self.device)
 
-    def forward(self, x):
-        return [pe(x) for pe in self.patch_embeds]  # cada path desde el mismo x
+        elif self.opt.pose_model_type == "shared":
+            self.models["pose"] = networks.PoseDecoder(
+                self.models["encoder"].num_ch_enc,
+                num_input_features=self.num_pose_frames - 1,
+                num_frames_to_predict_for=2
+            )
+            self.models["pose"].to(self.device)
 
-
-
-class ConvPosEnc(nn.Module):
-    """Convolutional Position Encoding.
-    Note: This module is similar to the conditional position encoding in CPVT.
-    """
-
-    def __init__(self, dim, k=3):
-        super(ConvPosEnc, self).__init__()
-
-        self.proj = nn.Conv2d(dim, dim, k, 1, k // 2, groups=dim)
-
-    def forward(self, x, size):
-        B, N, C = x.shape
-        H, W = size
-
-        feat = x.transpose(1, 2).contiguous().view(B, C, H, W)
-        x = self.proj(feat) + feat
-        x = x.flatten(2).transpose(1, 2).contiguous()
-
-        return x
-
-
-class ConvRelPosEnc(nn.Module):
-    """Convolutional relative position encoding."""
-    def __init__(self, Ch, h, window):
-        """Initialization.
-
-        Ch: Channels per head.
-        h: Number of heads.
-        window: Window size(s) in convolutional relative positional encoding.
-                It can have two forms:
-                1. An integer of window size, which assigns all attention heads
-                   with the same window size in ConvRelPosEnc.
-                2. A dict mapping window size to #attention head splits
-                   (e.g. {window size 1: #attention head split 1, window size
-                                      2: #attention head split 2})
-                   It will apply different window size to
-                   the attention head splits.
-        """
-        super().__init__()
-
-        if isinstance(window, int):
-            # Set the same window size for all attention heads.
-            window = {window: h}
-            self.window = window
-        elif isinstance(window, dict):
-            self.window = window
+        elif self.opt.pose_model_type == "posecnn":
+            self.models["pose"] = networks.PoseCNN(self.num_pose_frames)
+            self.models["pose"].to(self.device)
         else:
-            raise ValueError()
+            raise ValueError(f"Unknown pose_model_type: {self.opt.pose_model_type}")
 
-        self.conv_list = nn.ModuleList()
-        self.head_splits = []
-        for cur_window, cur_head_split in window.items():
-            dilation = 1  # Use dilation=1 at default.
-            padding_size = (cur_window + (cur_window - 1) *
-                            (dilation - 1)) // 2
-            cur_conv = nn.Conv2d(
-                cur_head_split * Ch,
-                cur_head_split * Ch,
-                kernel_size=(cur_window, cur_window),
-                padding=(padding_size, padding_size),
-                dilation=(dilation, dilation),
-                groups=cur_head_split * Ch,
+        # Predictive mask (optional)
+        if self.opt.predictive_mask:
+            self.models["predictive_mask"] = networks.DepthDecoder(
+                self.models["encoder"].num_ch_enc,
+                self.opt.scales,
+                num_output_channels=(self.num_input_frames - 1)
+            )
+            self.models["predictive_mask"].to(self.device)
+
+        # Trainable parameters
+        for k, m in self.models.items():
+            self.parameters_to_train += list(m.parameters())
+
+        # Optimizer & scheduler
+        self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
+        self.model_lr_scheduler = optim.lr_scheduler.StepLR(
+            self.model_optimizer, self.opt.scheduler_step_size, 0.1
+        )
+
+        # SSIM
+        self.ssim = SSIM()
+        self.ssim.to(self.device)
+
+        # Backproject / project layers
+        self.backproject_depth = {}
+        self.project_3d = {}
+        for scale in self.opt.scales:
+            h = self.opt.height // (2 ** scale)
+            w = self.opt.width // (2 ** scale)
+            self.backproject_depth[scale] = BackprojectDepth(self.opt.batch_size, h, w).to(self.device)
+            self.project_3d[scale] = Project3D(self.opt.batch_size, h, w).to(self.device)
+
+        # Load weights if provided
+        if self.opt.load_weights_folder is not None:
+            self.load_model()
+
+        # -------------------------
+        # DATA
+        # -------------------------
+        splits_dir = os.path.join(os.path.dirname(__file__), "splits", self.opt.split)
+        train_fpath = os.path.join(splits_dir, "train_files.txt")
+        val_fpath = os.path.join(splits_dir, "val_files.txt")
+
+        if not os.path.exists(val_fpath):
+            # Hamlyn split in your repo may not include val_files; fall back to test_files
+            test_fpath = os.path.join(splits_dir, "test_files.txt")
+            if os.path.exists(test_fpath):
+                print(f"[split] WARNING: {val_fpath} not found. Using {test_fpath} as validation.")
+                val_fpath = test_fpath
+            else:
+                raise FileNotFoundError(f"Missing val_files.txt and test_files.txt in {splits_dir}")
+
+        train_filenames = readlines(train_fpath)
+        val_filenames = readlines(val_fpath)
+
+        self.num_total_steps = len(train_filenames) // self.opt.batch_size * self.opt.num_epochs
+
+        dataset_dict = {
+            "kitti": datasets.KITTIRAWDataset,
+            "kitti_odom": datasets.KITTIOdomDataset,
+            "kitti_depth": datasets.KITTIDepthDataset,
+            "kitti_test": datasets.KITTITestDataset,
+            "endovis": datasets.EndovisDataset,
+            "hamlyn": datasets.HamlynDataset,
+        }
+        self.dataset = dataset_dict[self.opt.dataset]
+
+        extra_ds_kwargs = {}
+        if self.opt.dataset == "hamlyn":
+            extra_ds_kwargs = {
+                "strict_neighbors": getattr(self.opt, "hamlyn_strict_neighbors", False),
+                "neighbor_search_max": getattr(self.opt, "neighbor_search_max", 10),
+            }
+
+        train_dataset = self.dataset(
+            self.opt.data_path, train_filenames, self.opt.height, self.opt.width,
+            self.opt.frame_ids, 4,
+            is_train=True,
+            img_ext=".png" if self.opt.png else ".jpg",
+            **extra_ds_kwargs
+        )
+        self.train_loader = DataLoader(
+            train_dataset, self.opt.batch_size, True,
+            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True
+        )
+
+        val_dataset = self.dataset(
+            self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
+            self.opt.frame_ids, 4,
+            is_train=False,
+            img_ext=".png" if self.opt.png else ".jpg",
+            **extra_ds_kwargs
+        )
+        self.val_loader = DataLoader(
+            val_dataset, self.opt.eval_batch_size, False,
+            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True
+        )
+
+        print("Training model named:", self.opt.model_name)
+        print("Models and logs will be saved to:", self.opt.log_dir)
+        print("Using device:", self.device)
+        print("Using split:", self.opt.split)
+        print("Training samples:", len(train_dataset), "Validation samples:", len(val_dataset))
+
+        self.epoch = 0
+        self.step = 0
+        self.start_time = time.time()
+
+    # -------------------------
+    # TRAIN LOOP
+    # -------------------------
+    def train(self):
+        for self.epoch in range(self.opt.num_epochs):
+            self.run_epoch()
+
+            if (self.epoch + 1) % self.opt.save_frequency == 0:
+                self.save_model()
+
+            if getattr(self.opt, "eval_each_epoch", False):
+                self.try_eval_each_epoch()
+
+            self.model_lr_scheduler.step()
+
+    def run_epoch(self):
+        for m in self.models.values():
+            m.train()
+
+        print(f"Epoch {self.epoch + 1}/{self.opt.num_epochs} - Training")
+
+        for batch_idx, inputs in enumerate(self.train_loader):
+            before_op_time = time.time()
+
+            outputs, losses = self.process_batch(inputs)
+
+            loss = losses["loss"]
+
+            self.model_optimizer.zero_grad(set_to_none=True)
+
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.model_optimizer)
+            self.scaler.update()
+
+            duration = time.time() - before_op_time
+
+            # Logging
+            if self.step % self.opt.log_frequency == 0:
+                self.log_time(batch_idx, duration, loss)
+                self.log_wandb(losses)
+
+            self.step += 1
+
+    # -------------------------
+    # BATCH
+    # -------------------------
+    def process_batch(self, inputs):
+        for k in list(inputs.keys()):
+            inputs[k] = inputs[k].to(self.device)
+
+        with autocast(enabled=(self.device.type == "cuda")):
+            features = self.models["encoder"](inputs[("color_aug", 0, 0)])
+            # IMPORTANT: do NOT reverse features; DepthDecoder expects [low->high] order.
+            outputs = self.models["depth"](features)
+
+            if self.opt.predictive_mask:
+                outputs["predictive_mask"] = self.models["predictive_mask"](features)
+
+            if self.opt.pose_model_type == "shared":
+                pose_feats = [features]
+            else:
+                pose_feats = None
+
+            outputs.update(self.predict_poses(inputs, features, pose_feats))
+
+            self.generate_images_pred(inputs, outputs)
+            losses = self.compute_losses(inputs, outputs)
+
+        return outputs, losses
+
+    # -------------------------
+    # POSE
+    # -------------------------
+    def predict_poses(self, inputs, features, pose_feats):
+        outputs = {}
+
+        if self.num_pose_frames == 2:
+            # predict poses for each source frame individually
+            for f_i in self.opt.frame_ids[1:]:
+                if f_i == "s":
+                    continue
+
+                if self.opt.pose_model_type == "separate_resnet":
+                    pose_inputs = torch.cat([inputs[("color_aug", 0, 0)], inputs[("color_aug", f_i, 0)]], 1)
+                    pose_feats_i = self.models["pose_encoder"](pose_inputs)
+                    axisangle, translation = self.models["pose"]([pose_feats_i[-1]])
+                elif self.opt.pose_model_type == "shared":
+                    # pose_feats already computed
+                    axisangle, translation = self.models["pose"](pose_feats, [f_i])
+                else:  # posecnn
+                    pose_inputs = torch.cat([inputs[("color_aug", f_i, 0)], inputs[("color_aug", 0, 0)]], 1)
+                    axisangle, translation = self.models["pose"](pose_inputs)
+
+                outputs[("axisangle", 0, f_i)] = axisangle
+                outputs[("translation", 0, f_i)] = translation
+
+                outputs[("cam_T_cam", 0, f_i)] = networks.transformation_from_parameters(
+                    axisangle[:, 0], translation[:, 0], invert=(f_i < 0)
                 )
-            self.conv_list.append(cur_conv)
-            self.head_splits.append(cur_head_split)
-        self.channel_splits = [x * Ch for x in self.head_splits]
 
-    def forward(self, q, v, size):
-        """foward function"""
-        B, h, N, Ch = q.shape
-        H, W = size
+        else:
+            raise NotImplementedError("pose_model_input='all' not supported in this patched trainer")
 
-        # We don't use CLS_TOKEN
-        q_img = q
-        v_img = v
+        return outputs
 
-        # Shape: [B, h, H*W, Ch] -> [B, h*Ch, H, W].
-        v_img = rearrange(v_img, "B h (H W) Ch -> B (h Ch) H W", H=H, W=W)
-        # Split according to channels.
-        v_img_list = torch.split(v_img, self.channel_splits, dim=1)
-        conv_v_img_list = [
-            conv(x) for conv, x in zip(self.conv_list, v_img_list)
+    # -------------------------
+    # IMAGE SYNTHESIS
+    # -------------------------
+    def generate_images_pred(self, inputs, outputs):
+        """
+        Generate the warped (reprojected) images for photometric loss.
+        """
+        for scale in self.opt.scales:
+            disp = outputs[("disp", scale)]
+            if not self.opt.v1_multiscale:
+                disp = F.interpolate(disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
+            _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+            outputs[("depth", 0, scale)] = depth
+
+            for f_i in self.opt.frame_ids[1:]:
+                if f_i == "s":
+                    continue
+
+                T = outputs[("cam_T_cam", 0, f_i)]
+                cam_points = self.backproject_depth[scale](
+                    depth, inputs[("inv_K", 0)]
+                )
+                pix_coords = self.project_3d[scale](
+                    cam_points, inputs[("K", 0)], T
+                )
+                outputs[("sample", f_i, scale)] = pix_coords
+                outputs[("color", f_i, scale)] = F.grid_sample(
+                    inputs[("color", f_i, 0)],
+                    pix_coords,
+                    padding_mode="border",
+                    align_corners=True
+                )
+
+                if not self.opt.disable_automasking:
+                    outputs[("color_identity", f_i, scale)] = inputs[("color", f_i, 0)]
+
+    # -------------------------
+    # LOSSES
+    # -------------------------
+    def compute_reprojection_loss(self, pred, target):
+        abs_diff = torch.abs(target - pred)
+        l1_loss = abs_diff.mean(1, True)
+
+        if self.opt.no_ssim:
+            reprojection_loss = l1_loss
+        else:
+            ssim_loss = self.ssim(pred, target).mean(1, True)
+            reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
+
+        return reprojection_loss
+
+    def compute_losses(self, inputs, outputs):
+        losses = {}
+        total_loss = 0
+
+        for scale in self.opt.scales:
+            loss = 0
+            reprojection_losses = []
+
+            target = inputs[("color", 0, 0)]
+            pred = outputs[("color", self.opt.frame_ids[1], scale)]
+            # NOTE: above line expects frame_ids[1] exists (-1 by default). We'll compute for all frames below.
+
+            # reprojection for each source frame
+            for frame_id in self.opt.frame_ids[1:]:
+                if frame_id == "s":
+                    continue
+                pred = outputs[("color", frame_id, scale)]
+                reprojection_losses.append(self.compute_reprojection_loss(pred, target))
+
+            reprojection_losses = torch.cat(reprojection_losses, 1)
+
+            if not self.opt.disable_automasking:
+                identity_reprojection_losses = []
+                for frame_id in self.opt.frame_ids[1:]:
+                    if frame_id == "s":
+                        continue
+                    pred = inputs[("color", frame_id, 0)]
+                    identity_reprojection_losses.append(self.compute_reprojection_loss(pred, target))
+
+                identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
+
+                if self.opt.avg_reprojection:
+                    identity_reprojection_losses = identity_reprojection_losses.mean(1, keepdim=True)
+                else:
+                    identity_reprojection_losses = identity_reprojection_losses
+
+                if self.opt.avg_reprojection:
+                    reprojection_losses = reprojection_losses.mean(1, keepdim=True)
+
+                combined = torch.cat([identity_reprojection_losses, reprojection_losses], dim=1)
+
+                if combined.shape[1] == 1:
+                    to_optimise = combined
+                else:
+                    to_optimise, _ = torch.min(combined, dim=1)
+                    to_optimise = to_optimise.unsqueeze(1)
+            else:
+                if self.opt.avg_reprojection:
+                    reprojection_losses = reprojection_losses.mean(1, keepdim=True)
+                to_optimise, _ = torch.min(reprojection_losses, dim=1)
+                to_optimise = to_optimise.unsqueeze(1)
+
+            loss += to_optimise.mean()
+
+            # smoothness
+            disp = outputs[("disp", scale)]
+            mean_disp = disp.mean(2, True).mean(3, True)
+            norm_disp = disp / (mean_disp + 1e-7)
+            smooth_loss = get_smooth_loss(norm_disp, target)
+            loss += self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
+
+            total_loss += loss
+            losses[f"loss/{scale}"] = loss.detach()
+
+        total_loss /= self.num_scales
+        losses["loss"] = total_loss
+
+        return losses
+
+    # -------------------------
+    # LOGGING
+    # -------------------------
+    def log_time(self, batch_idx, duration, loss):
+        samples_per_sec = self.opt.batch_size / duration
+        time_sofar = time.time() - self.start_time
+        training_time_left = (self.num_total_steps / max(1, self.step) - 1.0) * time_sofar
+
+        print_string = "epoch {:>3} | batch {:>6} | examples/s: {:5.1f} | loss: {:.5f} | time elapsed: {} | time left: {}"
+        print(print_string.format(
+            self.epoch + 1, batch_idx, samples_per_sec, loss.item(),
+            sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)
+        ))
+
+    def log_wandb(self, losses):
+        log_dict = {}
+        for k, v in losses.items():
+            if torch.is_tensor(v):
+                log_dict[k] = float(v.detach().cpu().item())
+            else:
+                log_dict[k] = float(v)
+        wandb.log(log_dict, step=self.step)
+
+    # -------------------------
+    # SAVE/LOAD
+    # -------------------------
+    def save_model(self):
+        save_folder = os.path.join(self.log_path, "models", f"weights_{self.epoch}")
+        os.makedirs(save_folder, exist_ok=True)
+
+        for model_name, model in self.models.items():
+            save_path = os.path.join(save_folder, f"{model_name}.pth")
+            to_save = model.state_dict()
+            if model_name == "encoder" or model_name == "pose_encoder":
+                # store input size for evaluation
+                to_save = {**to_save, "height": self.opt.height, "width": self.opt.width}
+            torch.save(to_save, save_path)
+
+        # save opts
+        with open(os.path.join(save_folder, "opt.json"), "w") as f:
+            json.dump(vars(self.opt), f, indent=2)
+
+    def load_model(self):
+        load_folder = self.opt.load_weights_folder
+        print(f"Loading model from folder {load_folder}")
+
+        for n in self.opt.models_to_load:
+            if n not in self.models:
+                print(f"  [load_model] Skipping {n}: not in current model dict")
+                continue
+
+            path = os.path.join(load_folder, f"{n}.pth")
+            if not os.path.exists(path):
+                print(f"  [load_model] Missing: {path}")
+                continue
+
+            model_dict = self.models[n].state_dict()
+            pretrained_dict = torch.load(path, map_location=self.device)
+
+            # remove metadata keys
+            for meta_k in ["height", "width"]:
+                if meta_k in pretrained_dict:
+                    pretrained_dict.pop(meta_k)
+
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            model_dict.update(pretrained_dict)
+            self.models[n].load_state_dict(model_dict)
+
+    # -------------------------
+    # OPTIONAL: EVAL EACH EPOCH
+    # -------------------------
+    def try_eval_each_epoch(self):
+        """
+        Runs evaluate_hr_depth.py as a subprocess at the end of each epoch.
+        If it fails (e.g., missing GT), training continues.
+        """
+        weights_folder = os.path.join(self.log_path, "models", f"weights_{self.epoch}")
+        if not os.path.exists(weights_folder):
+            return
+
+        cmd = [
+            "python", "evaluate_hr_depth.py",
+            "--data_path", self.opt.data_path,
+            "--load_weights_folder", weights_folder,
+            "--eval_split", self.opt.eval_split,
+            "--eval_mono",
         ]
-        conv_v_img = torch.cat(conv_v_img_list, dim=1)
-        # Shape: [B, h*Ch, H, W] -> [B, h, H*W, Ch].
-        conv_v_img = rearrange(conv_v_img, "B (h Ch) H W -> B h (H W) Ch", h=h)
-
-        EV_hat_img = q_img * conv_v_img
-        EV_hat = EV_hat_img
-        return EV_hat
-
-
-class FactorAtt_ConvRelPosEnc(nn.Module):
-    """Factorized attention with convolutional relative position encoding class."""
-
-    def __init__(
-        self,
-        dim,
-        num_heads=8,
-        qkv_bias=False,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        shared_crpe=None,
-    ):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)  # Note: attn_drop is actually not used.
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-        # Shared convolutional relative position encoding.
-        self.crpe = shared_crpe
-
-    def forward(self, x, size):
-        B, N, C = x.shape
-
-        # Generate Q, K, V.
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-            .contiguous()
-        )  # Shape: [3, B, h, N, Ch].
-        q, k, v = qkv[0], qkv[1], qkv[2]  # Shape: [B, h, N, Ch].
-
-        # Factorized attention.
-        k_softmax = k.softmax(dim=2)  # Softmax on dim N.
-        k_softmax_T_dot_v = einsum(
-            "b h n k, b h n v -> b h k v", k_softmax, v
-        )  # Shape: [B, h, Ch, Ch].
-        factor_att = einsum(
-            "b h n k, b h k v -> b h n v", q, k_softmax_T_dot_v
-        )  # Shape: [B, h, N, Ch].
-
-        # Convolutional relative position encoding.
-        crpe = self.crpe(q, v, size=size)  # Shape: [B, h, N, Ch].
-
-        # Merge and reshape.
-        x = self.scale * factor_att + crpe
-        x = (
-            x.transpose(1, 2).reshape(B, N, C).contiguous()
-        )  # Shape: [B, h, N, Ch] -> [B, N, h, Ch] -> [B, N, C].
-
-        # Output projection.
-        x = self.proj(x)
-        x = self.proj_drop(x)
-
-        return x
-
-
-class MHCABlock(nn.Module):
-    def __init__(
-        self,
-        dim,
-        num_heads,
-        mlp_ratio=3,
-        drop_path=0.0,
-        qkv_bias=True,
-        qk_scale=None,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        shared_cpe=None,
-        shared_crpe=None,
-    ):
-        super().__init__()
-
-        self.cpe = shared_cpe
-        self.crpe = shared_crpe
-        self.factoratt_crpe = FactorAtt_ConvRelPosEnc(
-            dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_scale=qk_scale,
-            shared_crpe=shared_crpe,
-        )
-        self.mlp = Mlp(in_features=dim, hidden_features=dim * mlp_ratio)
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-
-        self.norm1 = norm_layer(dim)
-        self.norm2 = norm_layer(dim)
-
-    def forward(self, x, size):
-        # x.shape = [B, N, C]
-
-        if self.cpe is not None:
-            x = self.cpe(x, size)
-        cur = self.norm1(x)
-        x = x + self.drop_path(self.factoratt_crpe(cur, size))
-
-        cur = self.norm2(x)
-        x = x + self.drop_path(self.mlp(cur))
-        return x
-
-
-class MHCAEncoder(nn.Module):
-    def __init__(
-        self,
-        dim,
-        num_layers=1,
-        num_heads=8,
-        mlp_ratio=3,
-        drop_path_list=[],
-        qk_scale=None,
-        crpe_window={3: 2, 5: 3, 7: 3},
-    ):
-        super().__init__()
-
-        self.num_layers = num_layers
-        self.cpe = ConvPosEnc(dim, k=3)
-        self.crpe = ConvRelPosEnc(Ch=dim // num_heads, h=num_heads, window=crpe_window)
-        self.MHCA_layers = nn.ModuleList(
-            [
-                MHCABlock(
-                    dim,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    drop_path=drop_path_list[idx],
-                    qk_scale=qk_scale,
-                    shared_cpe=self.cpe,
-                    shared_crpe=self.crpe,
-                )
-                for idx in range(self.num_layers)
-            ]
-        )
-
-    def forward(self, x, size):
-        H, W = size
-        B = x.shape[0]
-        # x' shape : [B, N, C]
-        for layer in self.MHCA_layers:
-            x = layer(x, (H, W))
-
-        # return x's shape : [B, N, C] -> [B, C, H, W]
-        x = x.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
-        return x
-
-
-class ResBlock(nn.Module):
-    def __init__(
-        self,
-        in_features,
-        hidden_features=None,
-        out_features=None,
-        act_layer=nn.Hardswish,
-        norm_cfg=dict(type="BN"),
-    ):
-        super().__init__()
-
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-        self.conv1 = Conv2d_BN(
-            in_features, hidden_features, act_layer=act_layer, norm_cfg=norm_cfg
-        )
-        self.dwconv = nn.Conv2d(
-            hidden_features,
-            hidden_features,
-            3,
-            1,
-            1,
-            bias=False,
-            groups=hidden_features,
-        )
-        # self.norm = norm_layer(hidden_features)
-        self.norm = build_norm_layer(norm_cfg, hidden_features)[1]
-        self.act = act_layer()
-        self.conv2 = Conv2d_BN(hidden_features, out_features, norm_cfg=norm_cfg)
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv2d):
-            fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            fan_out //= m.groups
-            m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
-            if m.bias is not None:
-                m.bias.data.zero_()
-        elif isinstance(m, nn.BatchNorm2d):
-            m.weight.data.fill_(1)
-            m.bias.data.zero_()
-
-    def forward(self, x):
-        identity = x
-        feat = self.conv1(x)
-        feat = self.dwconv(feat)
-        feat = self.norm(feat)
-        feat = self.act(feat)
-        feat = self.conv2(feat)
-
-        return identity + feat
-
-
-class MHCA_stage(nn.Module):
-    def __init__(
-        self,
-        embed_dim,
-        out_embed_dim,
-        num_layers=1,
-        num_heads=8,
-        mlp_ratio=3,
-        num_path=4,
-        norm_cfg=dict(type="BN"),
-        drop_path_list=[],
-    ):
-        super().__init__()
-
-        self.mhca_blks = nn.ModuleList(
-            [
-                MHCAEncoder(
-                    embed_dim,
-                    num_layers,
-                    num_heads,
-                    mlp_ratio,
-                    drop_path_list=drop_path_list,
-                )
-                for _ in range(num_path)
-            ]
-        )
-
-        self.InvRes = ResBlock(
-            in_features=embed_dim, out_features=embed_dim, norm_cfg=norm_cfg
-        )
-        self.aggregate = Conv2d_BN(
-            embed_dim * (num_path + 1),
-            out_embed_dim,
-            act_layer=nn.Hardswish,
-            norm_cfg=norm_cfg,
-        )
-
-    def forward(self, inputs):
-        att_outputs = [self.InvRes(inputs[0])]
-        for x, encoder in zip(inputs, self.mhca_blks):
-            # [B, C, H, W] -> [B, N, C]
-            _, _, H, W = x.shape
-            x = x.flatten(2).transpose(1, 2).contiguous()
-            att_outputs.append(encoder(x, size=(H, W)))
-
-        out_concat = torch.cat(att_outputs, dim=1)
-        out = self.aggregate(out_concat)
-
-        return out,att_outputs
-
-
-def dpr_generator(drop_path_rate, num_layers, num_stages):
-    """
-    Generate drop path rate list following linear decay rule
-    """
-    dpr_list = [x.item() for x in torch.linspace(0, drop_path_rate, sum(num_layers))]
-    dpr = []
-    cur = 0
-    for i in range(num_stages):
-        dpr_per_stage = dpr_list[cur : cur + num_layers[i]]
-        dpr.append(dpr_per_stage)
-        cur += num_layers[i]
-
-    return dpr
-
-
-#@BACKBONES.register_module()
-class MPViT(nn.Module):
-    """Multi-Path ViT class."""
-
-    def __init__(
-        self,
-        num_classes=80,
-        in_chans=3,
-        num_stages=4,
-        num_layers=[1, 1, 1, 1],
-        mlp_ratios=[8, 8, 4, 4],
-        num_path=[4, 4, 4, 4],
-        embed_dims=[64, 128, 256, 512],
-        num_heads=[8, 8, 8, 8],
-        drop_path_rate=0.2,
-        norm_cfg=dict(type="BN"),
-        norm_eval=False,
-        pretrained=None,
-    ):
-        super().__init__()
-
-        self.num_classes = num_classes
-        self.num_stages = num_stages
-        self.conv_norm_cfg = norm_cfg
-        self.norm_eval = norm_eval
-
-        dpr = dpr_generator(drop_path_rate, num_layers, num_stages)
-
-        self.stem = nn.Sequential(
-            Conv2d_BN(in_chans, embed_dims[0] // 2, 
-                      kernel_size=3, 
-                      stride=2, 
-                      pad=1,
-                    act_layer=nn.Hardswish, 
-                    norm_cfg=self.conv_norm_cfg),  # -> 1/2
-            Conv2d_BN(embed_dims[0] // 2, embed_dims[0], 
-                      kernel_size=3, 
-                      stride=1, 
-                      pad=1,
-                    act_layer=nn.Hardswish, 
-                    norm_cfg=self.conv_norm_cfg),  # -> se queda en 1/2
-        )
-
-
-        # Patch embeddings.
-        self.patch_embed_stages = nn.ModuleList(
-            [
-                Patch_Embed_stage(
-                    embed_dims[idx],
-                    num_path=num_path[idx],
-                    isPool=True,               # <- el stage 0 NO baja resolución
-                    norm_cfg=self.conv_norm_cfg,
-                )
-                for idx in range(self.num_stages)
-            ]
-        )
-
-        # Multi-Head Convolutional Self-Attention (MHCA)
-        self.mhca_stages = nn.ModuleList(
-            [
-                MHCA_stage(
-                    embed_dims[idx],
-                    embed_dims[idx + 1]
-                    if not (idx + 1) == self.num_stages
-                    else embed_dims[idx],
-                    num_layers[idx],
-                    num_heads[idx],
-                    mlp_ratios[idx],
-                    num_path[idx],
-                    norm_cfg=self.conv_norm_cfg,
-                    drop_path_list=dpr[idx],
-                )
-                for idx in range(self.num_stages)
-            ]
-        )
-
-    def init_weights(self, pretrained=None):
-        """Initialize the weights in backbone.
-
-        Args:
-            pretrained (str, optional): Path to pre-trained weights.
-                Defaults to None.
-        """
-
-        def _init_weights(m):
-            if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=0.02)
-                if isinstance(m, nn.Linear) and m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.bias, 0)
-                nn.init.constant_(m.weight, 1.0)
-
-        if isinstance(pretrained, str):
-            self.apply(_init_weights)
-            #logger = get_root_logger()
-            #logger = get_logger("mpvit")
-            #logger = get_logger()
-            logger = logging.getLogger()
-            load_checkpoint(self, pretrained, strict=False, logger=logger)
-        elif pretrained is None:
-            self.apply(_init_weights)
-        else:
-            raise TypeError("pretrained must be a str or None")
-
-    def forward_features(self, x):
-
-        # x's shape : [B, C, H, W]
-        outs = []
-        x = self.stem(x)  # Shape : [B, C, H/4, W/4]
-        outs.append(x)
-        for idx in range(self.num_stages):
-            att_inputs = self.patch_embed_stages[idx](x)
-            #outs.append(att_inputs)
-            x,ff = self.mhca_stages[idx](att_inputs)
-            outs.append(x)
-
-
-        return outs
-
-    def forward(self, x):
-        x = self.forward_features(x)
-
-        return x
-
-    def train(self, mode=True):
-        """Convert the model into training mode while keep normalization layer
-        freezed."""
-        super(MPViT, self).train(mode)
-        if mode and self.norm_eval:
-            for m in self.modules():
-                # trick: eval have effect on BatchNorm only
-                if isinstance(m, _BatchNorm):
-                    m.eval()
-
-
-def mpvit_tiny(**kwargs):
-    """mpvit_tiny :
-
-    - #paths : [2, 3, 3, 3]
-    - #layers : [1, 2, 4, 1]
-    - #channels : [64, 96, 176, 216]
-    - MLP_ratio : 2
-    Number of params: 5843736
-    FLOPs : 1654163812
-    Activations : 16641952
-    """
-
-    model = MPViT(
-        num_stages=4,
-        num_path=[2, 3, 3, 3],
-        num_layers=[1, 2, 4, 1],
-        embed_dims=[64, 96, 176, 216],
-        mlp_ratios=[2, 2, 2, 2],
-        num_heads=[8, 8, 8, 8],
-        **kwargs,
-    )
-    model.default_cfg = _cfg_mpvit()
-    return model
-
-
-def mpvit_xsmall(**kwargs):
-    """mpvit_xsmall :
-    - paths: [2, 3, 3, 3]
-    - layers: [1, 2, 4, 1]
-    - channels: [64, 128, 192, 256]
-    """
-    model = MPViT(
-        num_stages=4,
-        num_path=[2, 3, 3, 3],
-        num_layers=[1, 2, 4, 1],
-        embed_dims=[64, 128, 192, 256],
-        mlp_ratios=[4, 4, 4, 4],
-        num_heads=[8, 8, 8, 8],
-        **kwargs,
-    )
-    print("[MPViT-xsmall] Using random init (no pretrained).")
-    model.default_cfg = _cfg_mpvit()
-    return model
-
-
-def mpvit_small(**kwargs):
-    """mpvit_small :
-    - paths: [2, 3, 3, 3]
-    - layers: [1, 3, 6, 3]
-    - channels: [64, 128, 216, 288]
-    """
-    model = MPViT(
-        num_stages=4,
-        num_path=[2, 3, 3, 3],
-        num_layers=[1, 3, 6, 3],
-        embed_dims=[64, 128, 216, 288],
-        mlp_ratios=[4, 4, 4, 4],
-        num_heads=[8, 8, 8, 8],
-        **kwargs,
-    )
-    # Entrenamos desde cero (init aleatoria)
-    print("[MPViT-small] Using random init (no pretrained).")
-    model.default_cfg = _cfg_mpvit()
-    return model
-
-
-
-def mpvit_base(**kwargs):
-    """mpvit_base :
-
-    - #paths : [2, 3, 3, 3]
-    - #layers : [1, 3, 8, 3]
-    - #channels : [128, 224, 368, 480]
-    - MLP_ratio : 4
-    Number of params: 74845976
-    FLOPs : 16445326240
-    Activations : 60204392
-    """
-
-    model = MPViT(
-        num_stages=4,
-        num_path=[2, 3, 3, 3],
-        num_layers=[1, 3, 8, 3],
-        embed_dims=[128, 224, 368, 480],
-        mlp_ratios=[4, 4, 4, 4],
-        num_heads=[8, 8, 8, 8],
-        **kwargs,
-    )
-    model.default_cfg = _cfg_mpvit()
-    return model
+        # keep strict neighbors for hamlyn eval, if used in training
+        if getattr(self.opt, "hamlyn_strict_neighbors", False):
+            cmd += ["--hamlyn_strict_neighbors"]
+
+        print("[eval_each_epoch] Running:", " ".join(cmd))
+        try:
+            subprocess.run(cmd, check=True)
+        except Exception as e:
+            print("[eval_each_epoch] WARNING: evaluation failed:", repr(e))

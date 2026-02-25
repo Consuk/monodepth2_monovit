@@ -26,6 +26,16 @@ class HamlynDataset(MonoDataset):
     e.g. "rectified08 1749 l"
     """
     def __init__(self, *args, **kwargs):
+        # Accept strict-neighbor args (used by --hamlyn_strict_neighbors)
+        strict_neighbors = kwargs.pop("strict_neighbors", None)
+        if strict_neighbors is None:
+            strict_neighbors = kwargs.pop("hamlyn_strict_neighbors", False)
+        neighbor_search_max = kwargs.pop("neighbor_search_max", 10)
+
+        # Set BEFORE MonoDataset.__init__ so its getattr(self, ...) picks them up.
+        self.strict_neighbors = bool(strict_neighbors)
+        self.neighbor_search_max = int(neighbor_search_max)
+
         super(HamlynDataset, self).__init__(*args, **kwargs)
         self._K_cache = {}           # Cache normalized intrinsics per sequence (4x4)
         self._actual_seq_cache = {}  # Cache mapping folder name to actual sequence root path
