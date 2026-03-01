@@ -71,9 +71,10 @@ class Trainer:
         # MODELS
         # -------------------------
         # Encoder: MPViT small (monovit)
-        # Use mpvit_small to build the encoder instead of mpvit_tiny. This
-        # function is imported from mpvit.py and returns a MPViT-small model.
-        self.models["encoder"] = networks.mpvit_small()
+        # Explicitly set in_chans=3 so that the stem convolution expects three
+        # input channels. Without this argument MPViT defaults to 3, but we
+        # specify it here for clarity.
+        self.models["encoder"] = networks.mpvit_small(in_chans=3)
         self.models["encoder"].to(self.device)
 
         # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
@@ -96,9 +97,10 @@ class Trainer:
         # Pose network
         if self.opt.pose_model_type == "separate_resnet":
             # MPViT pose encoder over concatenated (target, source) -> 6 channels
-            # Use mpvit_small for pose encoder as well to maintain the same
-            # architecture family.
-            self.models["pose_encoder"] = networks.mpvit_small()
+            # Use mpvit_small for pose encoder and set in_chans=6 so that the
+            # stem accepts six input channels. This avoids the mismatch seen
+            # when using the default 3-channel stem.
+            self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
             self.models["pose_encoder"].to(self.device)
             self.models["pose_encoder"].num_ch_enc = infer_num_ch_enc(
                 self.models["pose_encoder"], in_chans=6,
