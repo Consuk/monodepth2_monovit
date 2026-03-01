@@ -36,17 +36,19 @@ class DepthDecoderT(nn.Module):
         for j in range(5):
             for i in range(5 - j):
                 # upconv 0
-                num_ch_in = num_ch_enc[i]
+                # Cast to int to avoid float channel sizes and use integer division
+                num_ch_in = int(num_ch_enc[i])
                 if i == 0 and j != 0:
-                    num_ch_in /= 2
-                num_ch_out = num_ch_in / 2
-                self.convs["X_{}{}_Conv_0".format(i, j)] = ConvBlock(num_ch_in, num_ch_out)
+                    # Half the number of channels for skip levels when i==0
+                    num_ch_in = num_ch_in // 2
+                num_ch_out = num_ch_in // 2
+                self.convs[f"X_{i}{j}_Conv_0"] = ConvBlock(num_ch_in, num_ch_out)
 
                 # X_04 upconv 1, only add X_04 convolution
                 if i == 0 and j == 4:
                     num_ch_in = num_ch_out
-                    num_ch_out = self.num_ch_dec[i]
-                    self.convs["X_{}{}_Conv_1".format(i, j)] = ConvBlock(num_ch_in, num_ch_out)
+                    num_ch_out = int(self.num_ch_dec[i])
+                    self.convs[f"X_{i}{j}_Conv_1"] = ConvBlock(num_ch_in, num_ch_out)
 
         # declare fSEModule and original module
         for index in self.attention_position:
@@ -87,8 +89,7 @@ class DepthDecoderT(nn.Module):
     def forward(self, input_features):
         outputs = {}
         feat={}
-        # The following debug prints were removed to improve training performance.
-        # print("input_features[4]:", input_features[4])
+        # Debug prints removed for cleaner training logs
         feat[4] = self.convs["f4"](input_features[4])
         feat[3] = self.convs["f3"](input_features[3])
         feat[2] = self.convs["f2"](input_features[2])
@@ -109,19 +110,23 @@ class DepthDecoderT(nn.Module):
 
             # add fSE block to decoder
             if index in self.attention_position:
-                # Debug statements removed for cleaner training output
-                # print(f"Trying to access features['X_{row+1}{col-1}']")
-                # print(features.keys())
-                # print(f"Passing through X_{row+1}{col-1}_Conv_0 with input shape:",
-                #    None if features.get(f"X_{row+1}{col-1}") is None else features[f"X_{row+1}{col-1}"].shape)
-                features["X_"+index] = self.convs["X_" + index + "_attention"](
-                    self.convs["X_{}{}_Conv_0".format(row+1, col-1)](features["X_{}{}".format(row+1, col-1)]), low_features)
+                # Use attention module for this position
+                features[f"X_{index}"] = self.convs[f"X_{index}_attention"](
+                    self.convs[f"X_{row+1}{col-1}_Conv_0"](features[f"X_{row+1}{col-1}"]),
+                    low_features
+                )
             elif index in self.non_attention_position:
-                conv = [self.convs["X_{}{}_Conv_0".format(row + 1, col - 1)],
-                        self.convs["X_{}{}_Conv_1".format(row + 1, col - 1)]]
+                conv = [
+                    self.convs[f"X_{row + 1}{col - 1}_Conv_0"],
+                    self.convs[f"X_{row + 1}{col - 1}_Conv_1"],
+                ]
                 if col != 1:
-                    conv.append(self.convs["X_" + index + "_downsample"])
-                features["X_" + index] = self.nestConv(conv, features["X_{}{}".format(row+1, col-1)], low_features)
+                    conv.append(self.convs[f"X_{index}_downsample"])
+                features[f"X_{index}"] = self.nestConv(
+                    conv,
+                    features[f"X_{row+1}{col-1}"],
+                    low_features
+                )
 
         x = features["X_04"]
         x = self.convs["X_04_Conv_0"](x)
