@@ -87,9 +87,8 @@ class DepthDecoderT(nn.Module):
     def forward(self, input_features):
         outputs = {}
         feat={}
-        #print(len(input_features))
-        #print(input_features[4].shape)
-        print("input_features[4]:", input_features[4])
+        # The following debug prints were removed to improve training performance.
+        # print("input_features[4]:", input_features[4])
         feat[4] = self.convs["f4"](input_features[4])
         feat[3] = self.convs["f3"](input_features[3])
         feat[2] = self.convs["f2"](input_features[2])
@@ -110,10 +109,11 @@ class DepthDecoderT(nn.Module):
 
             # add fSE block to decoder
             if index in self.attention_position:
-                print(f"Trying to access features['X_{row+1}{col-1}']")
-                print(features.keys())
-                print(f"Passing through X_{row+1}{col-1}_Conv_0 with input shape:",
-                    None if features.get(f"X_{row+1}{col-1}") is None else features[f"X_{row+1}{col-1}"].shape)
+                # Debug statements removed for cleaner training output
+                # print(f"Trying to access features['X_{row+1}{col-1}']")
+                # print(features.keys())
+                # print(f"Passing through X_{row+1}{col-1}_Conv_0 with input shape:",
+                #    None if features.get(f"X_{row+1}{col-1}") is None else features[f"X_{row+1}{col-1}"].shape)
                 features["X_"+index] = self.convs["X_" + index + "_attention"](
                     self.convs["X_{}{}_Conv_0".format(row+1, col-1)](features["X_{}{}".format(row+1, col-1)]), low_features)
             elif index in self.non_attention_position:
