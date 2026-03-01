@@ -22,11 +22,11 @@ class DepthDecoderT(nn.Module):
         self.convs = nn.ModuleDict()
         
         # feature fusion
-        self.convs["f4"] = Attention_Module(self.ch_enc[4]  , num_ch_enc[4])
-        self.convs["f3"] = Attention_Module(self.ch_enc[3]  , num_ch_enc[3])
-        self.convs["f2"] = Attention_Module(self.ch_enc[2]  , num_ch_enc[2])
-        self.convs["f1"] = Attention_Module(self.ch_enc[1]  , num_ch_enc[1])
-        
+        self.convs["f4"] = Attention_Module(num_ch_enc[4], num_ch_enc[4])
+        self.convs["f3"] = Attention_Module(num_ch_enc[3], num_ch_enc[3])
+        self.convs["f2"] = Attention_Module(num_ch_enc[2], num_ch_enc[2])
+        self.convs["f1"] = Attention_Module(num_ch_enc[1], num_ch_enc[1])
+                
 
 
         self.all_position = ["01", "11", "21", "31", "02", "12", "22", "03", "13", "04"]
