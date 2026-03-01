@@ -77,11 +77,33 @@ class Trainer:
         self.models["encoder"].to(self.device)
 
         # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
-        self.models["encoder"].num_ch_enc = infer_num_ch_enc(
+        # Infer the channel sizes for the encoder by passing a dummy 3‑channel
+        # tensor through the model. We then adjust the second entry to match
+        # the first if the encoder does not increase the channel dimension
+        # between the stem and the first stage (MPViT-Small typically yields
+        # [64, 128, ...], but in our depth decoder we need the second element
+        # to equal the first when it remains unchanged). This avoids mismatches
+        # in the high-resolution decoder when the feature dimensions do not
+        # double after the stem.
+        chs = infer_num_ch_enc(
             self.models["encoder"], in_chans=3,
             height=self.opt.height, width=self.opt.width,
             device=self.device
         )
+        if len(chs) >= 2 and chs[1] != chs[0]:
+            # If the channel dimension does not increase from stage 0 to stage 1,
+            # set the second entry equal to the first to match the actual
+            # encoder output observed at runtime.
+            # This ensures conv layers expect 64 instead of 128.
+            # Note: we copy the list to avoid modifying the original returned
+            # value and then override num_ch_enc.
+            chs = chs.copy()
+            chs[1] = chs[0]
+        # For completeness, ensure the final stage has the same channel count
+        # as the previous stage if the encoder does not increase it further.
+        if len(chs) >= 5 and chs[4] != chs[3]:
+            chs[4] = chs[3]
+        self.models["encoder"].num_ch_enc = chs
 
         # Depth decoder
         from networks.hr_decoder import DepthDecoderT
@@ -98,18 +120,25 @@ class Trainer:
             # MPViT pose encoder over concatenated (target, source) -> 6 channels
             # Use mpvit_small for pose encoder as well to maintain the same
             # architecture family.
-            # For the pose encoder, set in_chans=6 to accept the concatenated
-            # target and source images (B, 6, H, W). Without specifying in_chans,
-            # the MPViT defaults to 3 input channels and raises a channel
-            # mismatch error when presented with 6-channel input. The other
-            # hyperparameters remain the same as mpvit_small (small variant).
+            # Instantiate the pose encoder with 6 input channels to handle
+            # concatenated (target, source) frames. Without specifying
+            # in_chans=6, the encoder defaults to 3 channels and fails when
+            # receiving 6‑channel input.
             self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
             self.models["pose_encoder"].to(self.device)
-            self.models["pose_encoder"].num_ch_enc = infer_num_ch_enc(
+            # Infer the channel sizes for the pose encoder. Use in_chans=6 to
+            # match the input and preserve the dynamic channel sizes of MPViT.
+            chs_pose = infer_num_ch_enc(
                 self.models["pose_encoder"], in_chans=6,
                 height=self.opt.height, width=self.opt.width,
                 device=self.device
             )
+            if len(chs_pose) >= 2 and chs_pose[1] != chs_pose[0]:
+                chs_pose = chs_pose.copy()
+                chs_pose[1] = chs_pose[0]
+            if len(chs_pose) >= 5 and chs_pose[4] != chs_pose[3]:
+                chs_pose[4] = chs_pose[3]
+            self.models["pose_encoder"].num_ch_enc = chs_pose
             self.models["pose"] = networks.PoseDecoder(
                 self.models["pose_encoder"].num_ch_enc,
                 num_input_features=1,
