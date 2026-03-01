@@ -80,9 +80,12 @@ class Trainer:
         )
 
         # Depth decoder
-        self.models["depth"] = networks.DepthDecoder(
-            self.models["encoder"].num_ch_enc,
-            self.opt.scales
+        from networks.hr_decoder import DepthDecoderT
+        self.models["depth"] = DepthDecoderT(
+            ch_enc=self.models["encoder"].num_ch_enc,      # canales del encoder
+            scales=self.opt.scales,
+            num_ch_enc=self.models["encoder"].num_ch_enc,  # lista de canales para skip connections
+            num_output_channels=1
         )
         self.models["depth"].to(self.device)
 
