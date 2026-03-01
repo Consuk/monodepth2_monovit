@@ -77,39 +77,11 @@ class Trainer:
         self.models["encoder"].to(self.device)
 
         # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
-        # NOTE: For MPViT models the channel sizes returned by a dummy forward
-        # may not reflect the actual embedding dimensions of each stage. In the
-        # MPViT design, the stem produces 64 channels, the first stage returns
-        # 128 channels, followed by 216 and 288 for the remaining two stages,
-        # with the last two stages both outputting 288 channels. However,
-        # infer_num_ch_enc may return a list like [64, 64, 128, 216, 288] if
-        # the internal aggregation does not increase the channel dimension for
-        # the first stage. This leads to a mismatch when used with the high
-        # resolution decoder (DepthDecoderT), which assumes the channel sizes
-        # double after the first stage. To ensure compatibility with
-        # DepthDecoderT, we override the inferred channel list with the
-        # expected MPViT-Small embedding dimensions.
-        inferred_chs = infer_num_ch_enc(
+        self.models["encoder"].num_ch_enc = infer_num_ch_enc(
             self.models["encoder"], in_chans=3,
             height=self.opt.height, width=self.opt.width,
             device=self.device
         )
-        # Explicitly set the channel sizes for MPViT-Small. The first element
-        # (stem) is retained from the inference, and the remaining entries are
-        # set to the known embed_dims: [128, 216, 288, 288].
-        # This avoids channel mismatches in DepthDecoderT when the inferred
-        # second entry is erroneously equal to the first.
-        if len(inferred_chs) >= 5:
-            self.models["encoder"].num_ch_enc = [
-                inferred_chs[0],  # 64
-                128,
-                216,
-                288,
-                288,
-            ]
-        else:
-            # Fallback: just use the inferred list
-            self.models["encoder"].num_ch_enc = inferred_chs
 
         # Depth decoder
         from networks.hr_decoder import DepthDecoderT
@@ -126,24 +98,18 @@ class Trainer:
             # MPViT pose encoder over concatenated (target, source) -> 6 channels
             # Use mpvit_small for pose encoder as well to maintain the same
             # architecture family.
-            self.models["pose_encoder"] = networks.mpvit_small()
+            # For the pose encoder, set in_chans=6 to accept the concatenated
+            # target and source images (B, 6, H, W). Without specifying in_chans,
+            # the MPViT defaults to 3 input channels and raises a channel
+            # mismatch error when presented with 6-channel input. The other
+            # hyperparameters remain the same as mpvit_small (small variant).
+            self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
             self.models["pose_encoder"].to(self.device)
-            inferred_pose_chs = infer_num_ch_enc(
+            self.models["pose_encoder"].num_ch_enc = infer_num_ch_enc(
                 self.models["pose_encoder"], in_chans=6,
                 height=self.opt.height, width=self.opt.width,
                 device=self.device
             )
-            if len(inferred_pose_chs) >= 5:
-                # Override with the known embed dimensions for MPViT-Small
-                self.models["pose_encoder"].num_ch_enc = [
-                    inferred_pose_chs[0],
-                    128,
-                    216,
-                    288,
-                    288,
-                ]
-            else:
-                self.models["pose_encoder"].num_ch_enc = inferred_pose_chs
             self.models["pose"] = networks.PoseDecoder(
                 self.models["pose_encoder"].num_ch_enc,
                 num_input_features=1,
