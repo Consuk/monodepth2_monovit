@@ -16,9 +16,8 @@ from torch.utils.data import DataLoader
 import datasets
 import networks
 import wandb
-# Import mpvit_small from our local MPViT implementation. This function
-# constructs the MPViT‑small backbone and returns the encoder.
-from mpvit import mpvit_small
+
+
 
 from layers import SSIM, BackprojectDepth, Project3D, disp_to_depth, get_smooth_loss
 from utils import readlines, normalize_image, sec_to_hm_str
@@ -74,7 +73,7 @@ class Trainer:
         # Encoder: MPViT small (monovit)
         # Use mpvit_small to build the encoder instead of mpvit_tiny. This
         # function is imported from mpvit.py and returns a MPViT-small model.
-        self.models["encoder"] = mpvit_small(in_chans=3)
+        self.models["encoder"] = networks.mpvit_small(in_chans=3)
         self.models["encoder"].to(self.device)
 
         # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
@@ -99,7 +98,7 @@ class Trainer:
             # MPViT pose encoder over concatenated (target, source) -> 6 channels
             # Use mpvit_small for pose encoder as well to maintain the same
             # architecture family.
-            self.models["pose_encoder"] = mpvit_small(in_chans=6)
+            self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
             self.models["pose_encoder"].to(self.device)
             self.models["pose_encoder"].num_ch_enc = infer_num_ch_enc(
                 self.models["pose_encoder"], in_chans=6,
