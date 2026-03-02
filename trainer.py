@@ -90,19 +90,7 @@ class Trainer:
             height=self.opt.height, width=self.opt.width,
             device=self.device
         )
-        if len(chs) >= 2 and chs[1] != chs[0]:
-            # If the channel dimension does not increase from stage 0 to stage 1,
-            # set the second entry equal to the first to match the actual
-            # encoder output observed at runtime.
-            # This ensures conv layers expect 64 instead of 128.
-            # Note: we copy the list to avoid modifying the original returned
-            # value and then override num_ch_enc.
-            chs = chs.copy()
-            chs[1] = chs[0]
-        # For completeness, ensure the final stage has the same channel count
-        # as the previous stage if the encoder does not increase it further.
-        if len(chs) >= 5 and chs[4] != chs[3]:
-            chs[4] = chs[3]
+        
         self.models["encoder"].num_ch_enc = chs
 
         # Depth decoder
