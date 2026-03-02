@@ -17,8 +17,7 @@ import datasets
 import networks
 import wandb
 
-from layers import SSIM, BackprojectDepth, Project3D, disp_to_depth, get_smooth_loss
-from networks.hr_layers import transformation_from_parameters
+from layers import transformation_from_parameters
 
 
 
