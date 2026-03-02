@@ -526,7 +526,17 @@ class Trainer:
             disp = outputs[("disp", scale)]
             mean_disp = disp.mean(2, True).mean(3, True)
             norm_disp = disp / (mean_disp + 1e-7)
-            smooth_loss = get_smooth_loss(norm_disp, target)
+            # Ensure the reference image used for smoothness has the same spatial size
+            if target.shape[-2:] != disp.shape[-2:]:
+                target_s = F.interpolate(
+                    target,
+                    size=disp.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            else:
+                target_s = target
+            smooth_loss = get_smooth_loss(norm_disp, target_s)
             loss = loss + (self.opt.disparity_smoothness * smooth_loss) / (2 ** scale)
             total_loss = total_loss + loss
             losses[f"loss/{scale}"] = loss.detach()
