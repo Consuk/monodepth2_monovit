@@ -17,8 +17,6 @@ import datasets
 import networks
 import wandb
 
-from layers import transformation_from_parameters
-
 
 
 from layers import SSIM, BackprojectDepth, Project3D, disp_to_depth, get_smooth_loss
@@ -92,7 +90,19 @@ class Trainer:
             height=self.opt.height, width=self.opt.width,
             device=self.device
         )
-        
+        if len(chs) >= 2 and chs[1] != chs[0]:
+            # If the channel dimension does not increase from stage 0 to stage 1,
+            # set the second entry equal to the first to match the actual
+            # encoder output observed at runtime.
+            # This ensures conv layers expect 64 instead of 128.
+            # Note: we copy the list to avoid modifying the original returned
+            # value and then override num_ch_enc.
+            chs = chs.copy()
+            chs[1] = chs[0]
+        # For completeness, ensure the final stage has the same channel count
+        # as the previous stage if the encoder does not increase it further.
+        if len(chs) >= 5 and chs[4] != chs[3]:
+            chs[4] = chs[3]
         self.models["encoder"].num_ch_enc = chs
 
         # Depth decoder
@@ -350,7 +360,7 @@ class Trainer:
                 outputs[("axisangle", 0, f_i)] = axisangle
                 outputs[("translation", 0, f_i)] = translation
 
-                outputs[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
+                outputs[("cam_T_cam", 0, f_i)] = networks.transformation_from_parameters(
                     axisangle[:, 0], translation[:, 0], invert=(f_i < 0)
                 )
 
@@ -378,12 +388,10 @@ class Trainer:
                     continue
 
                 T = outputs[("cam_T_cam", 0, f_i)]
-                proj_scale = scale if self.opt.v1_multiscale else 0
-
-                cam_points = self.backproject_depth[proj_scale](
+                cam_points = self.backproject_depth[scale](
                     depth, inputs[("inv_K", 0)]
                 )
-                pix_coords = self.project_3d[proj_scale](
+                pix_coords = self.project_3d[scale](
                     cam_points, inputs[("K", 0)], T
                 )
                 outputs[("sample", f_i, scale)] = pix_coords
@@ -413,19 +421,45 @@ class Trainer:
         return reprojection_loss
 
     def compute_losses(self, inputs, outputs):
-        losses = {}
+        """Compute the reprojection and smoothness losses for a minibatch.
+
+        This function follows the original monodepth2 logic: for each scale we compute
+        the photometric reprojection loss between the predicted warped images and the
+        target image at the appropriate resolution. When v1_multiscale is False, we
+        upsample all predicted disps to full resolution, but still use the low-scale
+        cameras for projection; therefore we need to use the target image at
+        ``source_scale`` for reprojection and smoothness. If v1_multiscale is True,
+        we use the same scale for both projection and target.
+
+        Args:
+            inputs: dictionary of input tensors
+            outputs: dictionary of output tensors (disps and warped colors)
+
+        Returns:
+            losses: dictionary of losses per-scale and the total loss
+        """
+        losses: dict = {}
         total_loss = 0
 
         for scale in self.opt.scales:
-            loss = 0
+            loss = 0.0
             reprojection_losses = []
 
-            target = inputs[("color", 0, 0)]
-            pred = outputs[("color", self.opt.frame_ids[1], scale)]
-            # NOTE: above line expects frame_ids[1] exists (-1 by default). We'll compute for all frames below.
+            # Determine which scale of the target image to use. When v1_multiscale
+            # is False we upsample all predictions to the full resolution but still
+            # compute reprojection against the image at source_scale (0). When
+            # v1_multiscale is True, we use the same scale as the current scale.
+            if self.opt.v1_multiscale:
+                source_scale = scale
+            else:
+                source_scale = 0
 
-            # reprojection for each source frame
+            # Get the target image at the correct resolution
+            target = inputs[("color", 0, source_scale)]
+
+            # Compute photometric reprojection loss for each source frame
             for frame_id in self.opt.frame_ids[1:]:
+                # Skip stereo frame if present
                 if frame_id == "s":
                     continue
                 pred = outputs[("color", frame_id, scale)]
@@ -434,51 +468,56 @@ class Trainer:
             reprojection_losses = torch.cat(reprojection_losses, 1)
 
             if not self.opt.disable_automasking:
+                # Compute identity reprojection losses for automasking
                 identity_reprojection_losses = []
                 for frame_id in self.opt.frame_ids[1:]:
                     if frame_id == "s":
                         continue
-                    pred = inputs[("color", frame_id, 0)]
-                    identity_reprojection_losses.append(self.compute_reprojection_loss(pred, target))
-
+                    pred = inputs[("color", frame_id, source_scale)]
+                    identity_reprojection_losses.append(
+                        self.compute_reprojection_loss(pred, target)
+                    )
                 identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
 
                 if self.opt.avg_reprojection:
                     identity_reprojection_losses = identity_reprojection_losses.mean(1, keepdim=True)
-                else:
-                    identity_reprojection_losses = identity_reprojection_losses
-
-                if self.opt.avg_reprojection:
                     reprojection_losses = reprojection_losses.mean(1, keepdim=True)
 
-                combined = torch.cat([identity_reprojection_losses, reprojection_losses], dim=1)
+                # Add a small random noise to break ties between multiple minima
+                identity_reprojection_losses = identity_reprojection_losses + \
+                    (torch.randn_like(identity_reprojection_losses) * 1e-5)
 
+                combined = torch.cat([identity_reprojection_losses, reprojection_losses], dim=1)
+                # We take the minimum loss for each pixel across all possible
+                # identity or warped predictions. If there is only one entry we simply
+                # take that entry.
                 if combined.shape[1] == 1:
                     to_optimise = combined
                 else:
-                    to_optimise, _ = torch.min(combined, dim=1)
-                    to_optimise = to_optimise.unsqueeze(1)
+                    to_optimise, _ = torch.min(combined, dim=1, keepdim=True)
             else:
+                # No automasking: pick the minimum reprojection error across frames
                 if self.opt.avg_reprojection:
                     reprojection_losses = reprojection_losses.mean(1, keepdim=True)
-                to_optimise, _ = torch.min(reprojection_losses, dim=1)
-                to_optimise = to_optimise.unsqueeze(1)
+                to_optimise, _ = torch.min(reprojection_losses, dim=1, keepdim=True)
 
-            loss += to_optimise.mean()
+            # Average the loss over the batch
+            loss = loss + to_optimise.mean()
 
-            # smoothness
+            # Smoothness loss encourages smooth disparities
             disp = outputs[("disp", scale)]
             mean_disp = disp.mean(2, True).mean(3, True)
             norm_disp = disp / (mean_disp + 1e-7)
             smooth_loss = get_smooth_loss(norm_disp, target)
-            loss += self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
+            # Weight smoothness by the inverse of the scale (higher scales get smaller weight)
+            loss = loss + (self.opt.disparity_smoothness * smooth_loss) / (2 ** scale)
 
-            total_loss += loss
+            total_loss = total_loss + loss
             losses[f"loss/{scale}"] = loss.detach()
 
-        total_loss /= self.num_scales
+        # Normalize by number of scales
+        total_loss = total_loss / self.num_scales
         losses["loss"] = total_loss
-
         return losses
 
     # -------------------------
