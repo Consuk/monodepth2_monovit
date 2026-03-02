@@ -61,7 +61,8 @@ class DepthDecoder(nn.Module):
 
         # Channel sizes for decoder layers (from smallest to largest scale).
         # These values follow the original monodepth2 implementation.
-        self.num_ch_dec = np.array([16, 32, 64, 128, 256])
+        # self.num_ch_dec = np.array([16, 32, 64, 128, 256])
+        self.num_ch_dec = np.array([64, 128, 216, 288, 288])
 
         # Build convolutional blocks for upsampling and feature fusion
         self.convs = OrderedDict()
