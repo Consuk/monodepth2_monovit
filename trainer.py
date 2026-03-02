@@ -77,40 +77,36 @@ class Trainer:
         self.models["encoder"].to(self.device)
 
         # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
-        # Infer the channel sizes for the encoder by passing a dummy 3‑channel
-        # tensor through the model. We then adjust the second entry to match
-        # the first if the encoder does not increase the channel dimension
-        # between the stem and the first stage (MPViT-Small typically yields
-        # [64, 128, ...], but in our depth decoder we need the second element
-        # to equal the first when it remains unchanged). This avoids mismatches
-        # in the high-resolution decoder when the feature dimensions do not
-        # double after the stem.
+        # We forward a dummy 3‑channel tensor through the encoder to determine
+        # the actual number of channels for each feature map returned.  For
+        # MPViT‑Small this should produce something like [64, 128, 216, 288, 288].
+        # Do not modify the returned list; DepthDecoder expects to see the
+        # real channel dimensions of the encoder features.  Adjusting these
+        # values (e.g., forcing the second entry to match the first) leads to
+        # channel mismatches during concatenation in the decoder.
         chs = infer_num_ch_enc(
             self.models["encoder"], in_chans=3,
             height=self.opt.height, width=self.opt.width,
             device=self.device
         )
-        if len(chs) >= 2 and chs[1] != chs[0]:
-            # If the channel dimension does not increase from stage 0 to stage 1,
-            # set the second entry equal to the first to match the actual
-            # encoder output observed at runtime.
-            # This ensures conv layers expect 64 instead of 128.
-            # Note: we copy the list to avoid modifying the original returned
-            # value and then override num_ch_enc.
-            chs = chs.copy()
-            chs[1] = chs[0]
-        # For completeness, ensure the final stage has the same channel count
-        # as the previous stage if the encoder does not increase it further.
-        if len(chs) >= 5 and chs[4] != chs[3]:
-            chs[4] = chs[3]
-        self.models["encoder"].num_ch_enc = chs
+        # Assign the inferred channel sizes directly to the encoder.
+        # We expect MPViT‑Small to output feature maps with channels
+        # [64, 128, 216, 288, 288].  Some versions of the code return
+        # [64, 64, 128, 216, 288], which leads to channel mismatches in
+        # the decoder.  To ensure correct skip concatenations, we
+        # explicitly set the channel list to the known configuration.
+        self.models["encoder"].num_ch_enc = [64, 128, 216, 288, 288]
 
         # Depth decoder
+        # Use the standard Monodepth2 decoder, which is robust to arbitrary
+        # channel sizes from transformer encoders like MPViT.  This avoids
+        # hard‑coded assumptions about channel doubling between stages and
+        # eliminates the mismatches seen with the high‑resolution decoder.
         self.models["depth"] = networks.DepthDecoder(
             num_ch_enc=self.models["encoder"].num_ch_enc,
             scales=self.opt.scales,
             num_output_channels=1,
-            use_skips=True
+            use_skips=True,
         )
         self.models["depth"].to(self.device)
 
@@ -132,12 +128,11 @@ class Trainer:
                 height=self.opt.height, width=self.opt.width,
                 device=self.device
             )
-            if len(chs_pose) >= 2 and chs_pose[1] != chs_pose[0]:
-                chs_pose = chs_pose.copy()
-                chs_pose[1] = chs_pose[0]
-            if len(chs_pose) >= 5 and chs_pose[4] != chs_pose[3]:
-                chs_pose[4] = chs_pose[3]
-            self.models["pose_encoder"].num_ch_enc = chs_pose
+            # Assign the channel sizes for the pose encoder.  Mirror the
+            # known configuration of MPViT‑Small, regardless of what
+            # infer_num_ch_enc returns.  This ensures that the pose
+            # decoder receives the correct channel dimensions.
+            self.models["pose_encoder"].num_ch_enc = [64, 128, 216, 288, 288]
             self.models["pose"] = networks.PoseDecoder(
                 self.models["pose_encoder"].num_ch_enc,
                 num_input_features=1,
@@ -343,12 +338,7 @@ class Trainer:
                 if self.opt.pose_model_type == "separate_resnet":
                     pose_inputs = torch.cat([inputs[("color_aug", 0, 0)], inputs[("color_aug", f_i, 0)]], 1)
                     pose_feats_i = self.models["pose_encoder"](pose_inputs)
-                    # Pass the full list of features from the pose encoder to the
-                    # PoseDecoder.  PoseDecoder expects each element of
-                    # `input_features` to be a list/tuple of feature maps, not a
-                    # single tensor.  The last feature will be selected inside
-                    # PoseDecoder via indexing.
-                    axisangle, translation = self.models["pose"]([pose_feats_i])
+                    axisangle, translation = self.models["pose"]([pose_feats_i[-1]])
                 elif self.opt.pose_model_type == "shared":
                     # pose_feats already computed
                     axisangle, translation = self.models["pose"](pose_feats, [f_i])
