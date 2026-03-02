@@ -76,35 +76,34 @@ class Trainer:
         self.models["encoder"] = networks.mpvit_small()
         self.models["encoder"].to(self.device)
 
-        # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
-        # Infer the channel sizes for the encoder by passing a dummy 3‑channel
-        # tensor through the model. MPViT returns a list of feature maps.
-        # We do not modify the channels except to ensure there are five entries
-        # (repeat the last channel if needed) and to replicate the last stage
-        # channel if it differs from the previous stage.
+        # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch.
+        # For the standard depth decoder, we do not require the channels to double
+        # between stages; instead, we accept the channels as returned by the encoder.
         chs = infer_num_ch_enc(
             self.models["encoder"], in_chans=3,
             height=self.opt.height, width=self.opt.width,
             device=self.device
         )
-        # If fewer than 5 feature maps are returned, replicate the last entry
-        # to satisfy the decoder's expectation.
+        # If the encoder returns fewer than five feature maps (rare with MPViT),
+        # replicate the last channel size so that the decoder always receives
+        # exactly five channel dimensions.
         if len(chs) < 5:
-            last = chs[-1]
-            chs = chs + [last] * (5 - len(chs))
-        # Ensure the final stage has the same channel count as the previous stage
-        # if the encoder does not increase it further.
-        if len(chs) >= 5 and chs[4] != chs[3]:
-            chs[4] = chs[3]
+            last = chs[-1] if len(chs) > 0 else 0
+            while len(chs) < 5:
+                chs.append(last)
         self.models["encoder"].num_ch_enc = chs
 
         # Depth decoder
-        from networks.hr_decoder import DepthDecoderT
-        self.models["depth"] = DepthDecoderT(
-            ch_enc=self.models["encoder"].num_ch_enc,      # canales del encoder
+        # Use the standard Monodepth2-style decoder instead of the high-resolution
+        # transformer-specific decoder.  The DepthDecoder is robust to arbitrary
+        # encoder channel sizes and does not assume that channel dimensions double
+        # between stages.  This avoids the channel-mismatch errors encountered
+        # with DepthDecoderT when using MPViT‑Small.
+        self.models["depth"] = networks.DepthDecoder(
+            num_ch_enc=self.models["encoder"].num_ch_enc,
             scales=self.opt.scales,
-            num_ch_enc=self.models["encoder"].num_ch_enc,  # lista de canales para skip connections
-            num_output_channels=1
+            num_output_channels=1,
+            use_skips=True
         )
         self.models["depth"].to(self.device)
 
@@ -120,21 +119,17 @@ class Trainer:
             self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
             self.models["pose_encoder"].to(self.device)
             # Infer the channel sizes for the pose encoder. Use in_chans=6 to
-            # match the input.  MPViT returns a list of feature maps.
+            # match the input and preserve the dynamic channel sizes of MPViT.
             chs_pose = infer_num_ch_enc(
                 self.models["pose_encoder"], in_chans=6,
                 height=self.opt.height, width=self.opt.width,
                 device=self.device
             )
-            # If fewer than 5 feature maps are returned, replicate the last entry
-            # to satisfy the decoder's expectation.
+            # Replicate the last channel size if fewer than five features are returned.
             if len(chs_pose) < 5:
-                last = chs_pose[-1]
-                chs_pose = chs_pose + [last] * (5 - len(chs_pose))
-            # Ensure the final stage has the same channel count as the previous stage
-            # if the encoder does not increase it further.
-            if len(chs_pose) >= 5 and chs_pose[4] != chs_pose[3]:
-                chs_pose[4] = chs_pose[3]
+                last = chs_pose[-1] if len(chs_pose) > 0 else 0
+                while len(chs_pose) < 5:
+                    chs_pose.append(last)
             self.models["pose_encoder"].num_ch_enc = chs_pose
             self.models["pose"] = networks.PoseDecoder(
                 self.models["pose_encoder"].num_ch_enc,
