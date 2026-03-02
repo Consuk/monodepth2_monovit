@@ -1,618 +1,686 @@
 from __future__ import absolute_import, division, print_function
 
+"""
+Custom Trainer for Monodepth2 using the MPViT‑Small encoder (MonoViT) and the
+standard Monodepth2 depth decoder. This trainer is based on the original
+Niantic Monodepth2 trainer but modified to:
+
+* Use the MPViT‑Small transformer encoder for depth estimation.
+* Set the encoder channel list to `[64, 128, 216, 288, 288]` to match
+  MPViT‑Small output dimensions.
+* Instantiate the standard DepthDecoder instead of the high‑resolution
+  transformer decoder. This avoids channel mismatches and allows the
+  encoder features to be decoded properly.
+* Use a ResNet pose encoder and pose decoder for the pose network.
+* Compute multiscale reprojection and smoothness losses in the same way
+  as the original Monodepth2 implementation, ensuring target images and
+  smoothness reference images are at the appropriate scale.
+
+To train with this trainer, instantiate it in `train.py` instead of the
+default trainer. For example:
+
+```
+from trainer_monovit import Trainer
+...
+trainer = Trainer(opts)
+trainer.train()
+```
+"""
+
 import os
 import time
 import json
-import subprocess
-from collections import OrderedDict
-
-import numpy as np
 
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+from layers import (
+    SSIM,
+    BackprojectDepth,
+    Project3D,
+    disp_to_depth,
+    get_smooth_loss,
+    transformation_from_parameters,
+)
+from utils import readlines, sec_to_hm_str
+
 import datasets
 import networks
 import wandb
 
 
-
-from layers import SSIM, BackprojectDepth, Project3D, disp_to_depth, get_smooth_loss
-from utils import readlines, normalize_image, sec_to_hm_str
-
-
-# -------------------------
-# AMP compatibility (torch 1.x / 2.x)
-# -------------------------
-try:
-    from torch.cuda.amp import autocast, GradScaler  # torch<=1.13
-except Exception:  # pragma: no cover
-    from torch.amp import autocast, GradScaler  # torch>=2.0
-
-
-def infer_num_ch_enc(encoder, in_chans, height, width, device):
-    """
-    Forward a dummy tensor through the encoder to infer the feature-channel sizes.
-    This is robust for custom backbones (e.g., MPViT) where num_ch_enc isn't fixed.
-    """
-    encoder.eval()
-    with torch.no_grad():
-        x = torch.zeros(1, in_chans, height, width, device=device)
-        feats = encoder(x)
-        if not isinstance(feats, (list, tuple)):
-            raise RuntimeError(
-                "Encoder forward must return a list/tuple of feature maps. "
-                f"Got type={type(feats)}")
-        chs = [int(f.shape[1]) for f in feats]
-    return chs
-
-
 class Trainer:
+    """Trainer object for MonoViT with the Monodepth2 training loop."""
+
     def __init__(self, options):
         self.opt = options
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
 
-        # Ensure input dimensions are multiples of 32 (required by decoder pyramid)
+        # Ensure height and width are multiples of 32 for the decoder
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
         assert self.opt.width % 32 == 0, "'width' must be a multiple of 32"
 
         self.device = torch.device("cpu" if self.opt.no_cuda else "cuda")
         self.num_scales = len(self.opt.scales)
         self.num_input_frames = len(self.opt.frame_ids)
-        self.num_pose_frames = 2 if self.opt.pose_model_input == "pairs" else self.num_input_frames
+        self.num_pose_frames = (
+            2 if self.opt.pose_model_input == "pairs" else self.num_input_frames
+        )
 
         self.models = {}
         self.parameters_to_train = []
-        self.scaler = GradScaler(enabled=(self.device.type == "cuda"))
 
-        # -------------------------
-        # MODELS
-        # -------------------------
-        # Encoder: MPViT small (monovit)
-        # Use mpvit_small to build the encoder instead of mpvit_tiny. This
-        # function is imported from mpvit.py and returns a MPViT-small model.
+        # ------------------------------------------------------------------
+        # Build models
+        # ------------------------------------------------------------------
+        # 1. Encoder: MPViT‑Small for depth estimation
         self.models["encoder"] = networks.mpvit_small()
+        # Fix the channel dimensions for MPViT‑Small
+        self.models["encoder"].num_ch_enc = [64, 128, 216, 288, 288]
         self.models["encoder"].to(self.device)
+        self.parameters_to_train += list(self.models["encoder"].parameters())
 
-        # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
-        # Infer the channel sizes for the encoder by passing a dummy 3‑channel
-        # tensor through the model. We then adjust the second entry to match
-        # the first if the encoder does not increase the channel dimension
-        # between the stem and the first stage (MPViT-Small typically yields
-        # [64, 128, ...], but in our depth decoder we need the second element
-        # to equal the first when it remains unchanged). This avoids mismatches
-        # in the high-resolution decoder when the feature dimensions do not
-        # double after the stem.
-        chs = infer_num_ch_enc(
-            self.models["encoder"], in_chans=3,
-            height=self.opt.height, width=self.opt.width,
-            device=self.device
-        )
-        if len(chs) >= 2 and chs[1] != chs[0]:
-            # If the channel dimension does not increase from stage 0 to stage 1,
-            # set the second entry equal to the first to match the actual
-            # encoder output observed at runtime.
-            # This ensures conv layers expect 64 instead of 128.
-            # Note: we copy the list to avoid modifying the original returned
-            # value and then override num_ch_enc.
-            chs = chs.copy()
-            chs[1] = chs[0]
-        # For completeness, ensure the final stage has the same channel count
-        # as the previous stage if the encoder does not increase it further.
-        if len(chs) >= 5 and chs[4] != chs[3]:
-            chs[4] = chs[3]
-        self.models["encoder"].num_ch_enc = chs
-
-        # Depth decoder
+        # 2. Depth decoder: standard Monodepth2 decoder
         self.models["depth"] = networks.DepthDecoder(
-            num_ch_enc=self.models["encoder"].num_ch_enc,
-            scales=self.opt.scales,
-            num_output_channels=1,
-            use_skips=True
-        ).to(self.device)
+            self.models["encoder"].num_ch_enc,
+            self.opt.scales,
+        )
         self.models["depth"].to(self.device)
+        self.parameters_to_train += list(self.models["depth"].parameters())
 
-        # Pose network
-        if self.opt.pose_model_type == "separate_resnet":
-            # MPViT pose encoder over concatenated (target, source) -> 6 channels
-            # Use mpvit_small for pose encoder as well to maintain the same
-            # architecture family.
-            # Instantiate the pose encoder with 6 input channels to handle
-            # concatenated (target, source) frames. Without specifying
-            # in_chans=6, the encoder defaults to 3 channels and fails when
-            # receiving 6‑channel input.
-            self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
-            self.models["pose_encoder"].to(self.device)
-            # Infer the channel sizes for the pose encoder. Use in_chans=6 to
-            # match the input and preserve the dynamic channel sizes of MPViT.
-            chs_pose = infer_num_ch_enc(
-                self.models["pose_encoder"], in_chans=6,
-                height=self.opt.height, width=self.opt.width,
-                device=self.device
-            )
-            if len(chs_pose) >= 2 and chs_pose[1] != chs_pose[0]:
-                chs_pose = chs_pose.copy()
-                chs_pose[1] = chs_pose[0]
-            if len(chs_pose) >= 5 and chs_pose[4] != chs_pose[3]:
-                chs_pose[4] = chs_pose[3]
-            self.models["pose_encoder"].num_ch_enc = chs_pose
-            self.models["pose"] = networks.PoseDecoder(
-                self.models["pose_encoder"].num_ch_enc,
-                num_input_features=1,
-                num_frames_to_predict_for=2
-            )
-            self.models["pose"].to(self.device)
+        # 3. Pose network: use a separate ResNet encoder and pose decoder
+        self.use_pose_net = not (
+            self.opt.use_stereo and self.opt.frame_ids == [0]
+        )
+        if self.use_pose_net:
+            if self.opt.pose_model_type == "separate_resnet":
+                # Pose encoder: ResNet
+                self.models["pose_encoder"] = networks.ResnetEncoder(
+                    self.opt.num_layers,
+                    self.opt.weights_init == "pretrained",
+                    num_input_images=self.num_pose_frames,
+                )
+                self.models["pose_encoder"].to(self.device)
+                self.parameters_to_train += list(
+                    self.models["pose_encoder"].parameters()
+                )
+                # Set the channel sizes for ResNet pose encoder
+                self.models["pose_encoder"].num_ch_enc = [64, 64, 128, 256, 512]
 
-        elif self.opt.pose_model_type == "shared":
-            self.models["pose"] = networks.PoseDecoder(
-                self.models["encoder"].num_ch_enc,
-                num_input_features=self.num_pose_frames - 1,
-                num_frames_to_predict_for=2
-            )
-            self.models["pose"].to(self.device)
+                # Pose decoder
+                self.models["pose"] = networks.PoseDecoder(
+                    self.models["pose_encoder"].num_ch_enc,
+                    num_input_features=1,
+                    num_frames_to_predict_for=2,
+                )
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
+            elif self.opt.pose_model_type == "shared":
+                # Use the depth encoder features for pose
+                self.models["pose"] = networks.PoseDecoder(
+                    self.models["encoder"].num_ch_enc,
+                    self.num_pose_frames,
+                )
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
+            elif self.opt.pose_model_type == "posecnn":
+                self.models["pose"] = networks.PoseCNN(
+                    self.num_input_frames
+                    if self.opt.pose_model_input == "all"
+                    else 2
+                )
+                self.models["pose"].to(self.device)
+                self.parameters_to_train += list(self.models["pose"].parameters())
 
-        elif self.opt.pose_model_type == "posecnn":
-            self.models["pose"] = networks.PoseCNN(self.num_pose_frames)
-            self.models["pose"].to(self.device)
-        else:
-            raise ValueError(f"Unknown pose_model_type: {self.opt.pose_model_type}")
-
-        # Predictive mask (optional)
+        # Predictive mask network (optional)
         if self.opt.predictive_mask:
+            assert self.opt.disable_automasking, (
+                "When using predictive_mask, please disable automasking with --disable_automasking"
+            )
             self.models["predictive_mask"] = networks.DepthDecoder(
                 self.models["encoder"].num_ch_enc,
                 self.opt.scales,
-                num_output_channels=(self.num_input_frames - 1)
+                num_output_channels=(len(self.opt.frame_ids) - 1),
             )
             self.models["predictive_mask"].to(self.device)
+            self.parameters_to_train += list(
+                self.models["predictive_mask"].parameters()
+            )
 
-        # Trainable parameters
-        for k, m in self.models.items():
-            self.parameters_to_train += list(m.parameters())
+        # ------------------------------------------------------------------
+        # Optimizer and scheduler
+        # ------------------------------------------------------------------
+        self.model_optimizer = optim.Adam(
+            self.parameters_to_train, self.opt.learning_rate
+        )
+        self.model_lr_scheduler = None
 
-        # Optimizer & scheduler
-        self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
-        self.model_lr_scheduler = optim.lr_scheduler.StepLR(
-            self.model_optimizer, self.opt.scheduler_step_size, 0.1
+        # Load pretrained weights if specified
+        if self.opt.load_weights_folder is not None:
+            self.load_model()
+
+        # ------------------------------------------------------------------
+        # Datasets and dataloaders
+        # ------------------------------------------------------------------
+        datasets_dict = {
+            "kitti": datasets.KITTIRAWDataset,
+            "kitti_odom": datasets.KITTIOdomDataset,
+            "endovis": datasets.SCAREDDataset,
+        }
+        self.dataset = datasets_dict[self.opt.dataset]
+
+        fpath = os.path.join(
+            os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt"
+        )
+        train_filenames = readlines(fpath.format("train"))
+        val_filenames = readlines(fpath.format("val"))
+        img_ext = ".png" if self.opt.png else ".jpg"
+
+        num_train_samples = len(train_filenames)
+        self.num_total_steps = (
+            num_train_samples // self.opt.batch_size * self.opt.num_epochs
         )
 
-        # SSIM
-        self.ssim = SSIM()
-        self.ssim.to(self.device)
+        train_dataset = self.dataset(
+            self.opt.data_path,
+            train_filenames,
+            self.opt.height,
+            self.opt.width,
+            self.opt.frame_ids,
+            4,
+            is_train=True,
+            img_ext=img_ext,
+        )
+        self.train_loader = DataLoader(
+            train_dataset,
+            self.opt.batch_size,
+            True,
+            num_workers=self.opt.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+        val_dataset = self.dataset(
+            self.opt.data_path,
+            val_filenames,
+            self.opt.height,
+            self.opt.width,
+            self.opt.frame_ids,
+            4,
+            is_train=False,
+            img_ext=img_ext,
+        )
+        self.val_loader = DataLoader(
+            val_dataset,
+            self.opt.batch_size,
+            False,
+            num_workers=self.opt.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+        self.val_iter = iter(self.val_loader)
 
-        # Backproject / project layers
+        # ------------------------------------------------------------------
+        # Additional utils
+        # ------------------------------------------------------------------
+        if not self.opt.no_ssim:
+            self.ssim = SSIM().to(self.device)
+
+        # Precompute backproject and project modules per scale
         self.backproject_depth = {}
         self.project_3d = {}
         for scale in self.opt.scales:
             h = self.opt.height // (2 ** scale)
             w = self.opt.width // (2 ** scale)
-            self.backproject_depth[scale] = BackprojectDepth(self.opt.batch_size, h, w).to(self.device)
-            self.project_3d[scale] = Project3D(self.opt.batch_size, h, w).to(self.device)
+            self.backproject_depth[scale] = BackprojectDepth(
+                self.opt.batch_size, h, w
+            ).to(self.device)
+            self.project_3d[scale] = Project3D(
+                self.opt.batch_size, h, w
+            ).to(self.device)
 
-        # Load weights if provided
-        if self.opt.load_weights_folder is not None:
-            self.load_model()
+        # Names for depth metrics
+        self.depth_metric_names = [
+            "de/abs_rel",
+            "de/sq_rel",
+            "de/rms",
+            "de/log_rms",
+            "da/a1",
+            "da/a2",
+            "da/a3",
+        ]
 
-        # -------------------------
-        # DATA
-        # -------------------------
-        splits_dir = os.path.join(os.path.dirname(__file__), "splits", self.opt.split)
-        train_fpath = os.path.join(splits_dir, "train_files.txt")
-        val_fpath = os.path.join(splits_dir, "val_files.txt")
-
-        if not os.path.exists(val_fpath):
-            # Hamlyn split in your repo may not include val_files; fall back to test_files
-            test_fpath = os.path.join(splits_dir, "test_files.txt")
-            if os.path.exists(test_fpath):
-                print(f"[split] WARNING: {val_fpath} not found. Using {test_fpath} as validation.")
-                val_fpath = test_fpath
-            else:
-                raise FileNotFoundError(f"Missing val_files.txt and test_files.txt in {splits_dir}")
-
-        train_filenames = readlines(train_fpath)
-        val_filenames = readlines(val_fpath)
-
-        self.num_total_steps = len(train_filenames) // self.opt.batch_size * self.opt.num_epochs
-
-        dataset_dict = {
-            "endovis": datasets.SCAREDDataset,
-            "hamlyn": datasets.HamlynDataset,
-        }
-        self.dataset = dataset_dict[self.opt.dataset]
-
-        train_dataset = self.dataset(
-            self.opt.data_path, train_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4,
-            is_train=True,
-            img_ext=".png" if self.opt.png else ".jpg",
-            strict_neighbors=getattr(self.opt, "hamlyn_strict_neighbors", False),
-            neighbor_search_max=getattr(self.opt, "neighbor_search_max", 10)
+        # Log some info
+        print("Using dataset split:", self.opt.split)
+        print(
+            f"There are {len(train_dataset)} training items and {len(val_dataset)} validation items"
         )
-        self.train_loader = DataLoader(
-            train_dataset, self.opt.batch_size, True,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True
-        )
-
-        val_dataset = self.dataset(
-            self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4,
-            is_train=False,
-            img_ext=".png" if self.opt.png else ".jpg",
-            strict_neighbors=getattr(self.opt, "hamlyn_strict_neighbors", False),
-            neighbor_search_max=getattr(self.opt, "neighbor_search_max", 10)
-        )
-        self.val_loader = DataLoader(
-            val_dataset, self.opt.eval_batch_size, False,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True
-        )
-
         print("Training model named:", self.opt.model_name)
-        print("Models and logs will be saved to:", self.opt.log_dir)
+        print("Models and logs will be saved to:", self.log_path)
         print("Using device:", self.device)
-        print("Using split:", self.opt.split)
-        print("Training samples:", len(train_dataset), "Validation samples:", len(val_dataset))
 
-        self.epoch = 0
-        self.step = 0
-        self.start_time = time.time()
+        # Save options to disk
+        self.save_opts()
 
-    # -------------------------
-    # TRAIN LOOP
-    # -------------------------
-    def train(self):
-        for self.epoch in range(self.opt.num_epochs):
-            self.run_epoch()
-
-            if (self.epoch + 1) % self.opt.save_frequency == 0:
-                self.save_model()
-
-            if getattr(self.opt, "eval_each_epoch", False):
-                self.try_eval_each_epoch()
-
-            self.model_lr_scheduler.step()
-
-    def run_epoch(self):
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
+    def set_train(self):
         for m in self.models.values():
             m.train()
 
-        print(f"Epoch {self.epoch + 1}/{self.opt.num_epochs} - Training")
+    def set_eval(self):
+        for m in self.models.values():
+            m.eval()
 
+    def train(self):
+        self.epoch = 0
+        self.step = 0
+        self.start_time = time.time()
+        for self.epoch in range(self.opt.num_epochs):
+            self.run_epoch()
+            if (self.epoch + 1) % self.opt.save_frequency == 0:
+                self.save_model()
+
+    def run_epoch(self):
+        print(f"Epoch {self.epoch+1}/{self.opt.num_epochs} - Training")
+        self.set_train()
         for batch_idx, inputs in enumerate(self.train_loader):
             before_op_time = time.time()
-
             outputs, losses = self.process_batch(inputs)
-
-            loss = losses["loss"]
-
-            self.model_optimizer.zero_grad(set_to_none=True)
-
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.model_optimizer)
-            self.scaler.update()
-
+            self.model_optimizer.zero_grad()
+            losses["loss"].backward()
+            self.model_optimizer.step()
             duration = time.time() - before_op_time
-
-            # Logging
-            if self.step % self.opt.log_frequency == 0:
-                self.log_time(batch_idx, duration, loss)
-                self.log_wandb(losses)
-
+            # Logging training progress periodically
+            if (
+                batch_idx % self.opt.log_frequency == 0
+                and self.step < 2000
+            ) or (self.step % 2000 == 0):
+                self.log_time(batch_idx, duration, losses["loss"])
+                # Optionally log depth metrics on validation batch
+                if "depth_gt" in inputs:
+                    self.compute_depth_losses(inputs, outputs, losses)
+                # Log images and losses to wandb
+                self.log("train", inputs, outputs, losses)
+                self.val()
             self.step += 1
+        if self.model_lr_scheduler is not None:
+            self.model_lr_scheduler.step()
 
-    # -------------------------
-    # BATCH
-    # -------------------------
     def process_batch(self, inputs):
-        for k in list(inputs.keys()):
-            inputs[k] = inputs[k].to(self.device)
+        # Move all inputs to device
+        for key, val in inputs.items():
+            inputs[key] = val.to(self.device)
 
-        with autocast(enabled=(self.device.type == "cuda")):
-            features = self.models["encoder"](inputs[("color_aug", 0, 0)])
-            # IMPORTANT: do NOT reverse features; DepthDecoder expects [low->high] order.
+        outputs = {}
+        # Depth encoder and decoder
+        if self.opt.pose_model_type == "shared":
+            # Shared encoder: run each frame separately
+            all_color_aug = torch.cat(
+                [inputs[("color_aug", i, 0)] for i in self.opt.frame_ids], 0
+            )
+            all_features = self.models["encoder"](all_color_aug)
+            all_features = [
+                torch.split(f, self.opt.batch_size) for f in all_features
+            ]
+            features = {}
+            for i, k in enumerate(self.opt.frame_ids):
+                features[k] = [f[i] for f in all_features]
+            outputs = self.models["depth"](features[0])
+        else:
+            # Only use frame 0 for depth
+            features = self.models["encoder"](inputs["color_aug", 0, 0])
             outputs = self.models["depth"](features)
 
-            if self.opt.predictive_mask:
-                outputs["predictive_mask"] = self.models["predictive_mask"](features)
+        # Predictive mask
+        if self.opt.predictive_mask:
+            outputs["predictive_mask"] = self.models["predictive_mask"](features)
 
-            if self.opt.pose_model_type == "shared":
-                pose_feats = [features]
-            else:
-                pose_feats = None
+        # Pose network
+        if self.use_pose_net:
+            outputs.update(self.predict_poses(inputs, features))
 
-            outputs.update(self.predict_poses(inputs, features, pose_feats))
-
-            self.generate_images_pred(inputs, outputs)
-            losses = self.compute_losses(inputs, outputs)
-
+        # Reconstruct images and compute losses
+        self.generate_images_pred(inputs, outputs)
+        losses = self.compute_losses(inputs, outputs)
         return outputs, losses
 
-    # -------------------------
-    # POSE
-    # -------------------------
-    def predict_poses(self, inputs, features, pose_feats):
+    def predict_poses(self, inputs, features):
         outputs = {}
-
         if self.num_pose_frames == 2:
-            # predict poses for each source frame individually
+            # Compute pose for each source frame via separate forward passes
+            if self.opt.pose_model_type == "shared":
+                pose_feats = {f_i: features[f_i] for f_i in self.opt.frame_ids}
+            else:
+                pose_feats = {
+                    f_i: inputs["color_aug", f_i, 0]
+                    for f_i in self.opt.frame_ids
+                }
             for f_i in self.opt.frame_ids[1:]:
                 if f_i == "s":
                     continue
-
+                if f_i < 0:
+                    pose_inputs = [pose_feats[f_i], pose_feats[0]]
+                else:
+                    pose_inputs = [pose_feats[0], pose_feats[f_i]]
                 if self.opt.pose_model_type == "separate_resnet":
-                    pose_inputs = torch.cat([inputs[("color_aug", 0, 0)], inputs[("color_aug", f_i, 0)]], 1)
-                    # The pose encoder returns a list of feature maps.  The pose decoder
-                    # expects a list of feature lists (one per input) rather than a
-                    # single tensor.  Passing the deepest feature alone ([-1]) will
-                    # index into the tensor and drop the batch dimension, leading to
-                    # shape mismatches.  Instead, wrap the entire list in another
-                    # list so that the decoder can index correctly.
-                    pose_feats_i = self.models["pose_encoder"](pose_inputs)
-                    axisangle, translation = self.models["pose"]([pose_feats_i])
-                elif self.opt.pose_model_type == "shared":
-                    # pose_feats already computed
-                    axisangle, translation = self.models["pose"](pose_feats, [f_i])
-                else:  # posecnn
-                    pose_inputs = torch.cat([inputs[("color_aug", f_i, 0)], inputs[("color_aug", 0, 0)]], 1)
-                    axisangle, translation = self.models["pose"](pose_inputs)
-
+                    pose_inputs = [self.models["pose_encoder"](torch.cat(pose_inputs, 1))]
+                elif self.opt.pose_model_type == "posecnn":
+                    pose_inputs = torch.cat(pose_inputs, 1)
+                axisangle, translation = self.models["pose"](pose_inputs)
                 outputs[("axisangle", 0, f_i)] = axisangle
                 outputs[("translation", 0, f_i)] = translation
-
-                outputs[("cam_T_cam", 0, f_i)] = networks.transformation_from_parameters(
+                outputs[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
                     axisangle[:, 0], translation[:, 0], invert=(f_i < 0)
                 )
-
         else:
-            raise NotImplementedError("pose_model_input='all' not supported in this patched trainer")
-
+            # Multi-frame input to the pose network
+            if self.opt.pose_model_type in ["separate_resnet", "posecnn"]:
+                pose_inputs = torch.cat(
+                    [
+                        inputs["color_aug", i, 0]
+                        for i in self.opt.frame_ids
+                        if i != "s"
+                    ],
+                    1,
+                )
+                if self.opt.pose_model_type == "separate_resnet":
+                    pose_inputs = [self.models["pose_encoder"](pose_inputs)]
+            elif self.opt.pose_model_type == "shared":
+                pose_inputs = [
+                    features[i] for i in self.opt.frame_ids if i != "s"
+                ]
+            axisangle, translation = self.models["pose"](pose_inputs)
+            for i, f_i in enumerate(self.opt.frame_ids[1:]):
+                if f_i == "s":
+                    continue
+                outputs[("axisangle", 0, f_i)] = axisangle
+                outputs[("translation", 0, f_i)] = translation
+                outputs[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
+                    axisangle[:, i], translation[:, i], invert=(f_i < 0)
+                )
         return outputs
 
-    # -------------------------
-    # IMAGE SYNTHESIS
-    # -------------------------
     def generate_images_pred(self, inputs, outputs):
-        """
-        Generate the warped (reprojected) images for photometric loss.
+        """Generate the warped (reprojected) color images for a minibatch.
+        Generated images are saved into the `outputs` dictionary.
         """
         for scale in self.opt.scales:
             disp = outputs[("disp", scale)]
-            if not self.opt.v1_multiscale:
-                disp = F.interpolate(disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-            _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+            if self.opt.v1_multiscale:
+                source_scale = scale
+            else:
+                # Upsample disp to full resolution
+                disp = F.interpolate(
+                    disp,
+                    [self.opt.height, self.opt.width],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                source_scale = 0
+            # Convert disp to depth
+            _, depth = disp_to_depth(
+                disp, self.opt.min_depth, self.opt.max_depth
+            )
             outputs[("depth", 0, scale)] = depth
-
             for f_i in self.opt.frame_ids[1:]:
                 if f_i == "s":
-                    continue
-
-                T = outputs[("cam_T_cam", 0, f_i)]
-                cam_points = self.backproject_depth[scale](
-                    depth, inputs[("inv_K", 0)]
+                    T = inputs["stereo_T"]
+                else:
+                    T = outputs[("cam_T_cam", 0, f_i)]
+                # If using posecnn, adjust T based on inverse depth
+                if self.opt.pose_model_type == "posecnn":
+                    axisangle = outputs[("axisangle", 0, f_i)]
+                    translation = outputs[("translation", 0, f_i)]
+                    inv_depth = 1 / depth
+                    mean_inv_depth = inv_depth.mean(3, True).mean(2, True)
+                    T = transformation_from_parameters(
+                        axisangle[:, 0],
+                        translation[:, 0] * mean_inv_depth[:, 0],
+                        invert=(f_i < 0),
+                    )
+                cam_points = self.backproject_depth[source_scale](
+                    depth, inputs[("inv_K", source_scale)]
                 )
-                pix_coords = self.project_3d[scale](
-                    cam_points, inputs[("K", 0)], T
+                pix_coords = self.project_3d[source_scale](
+                    cam_points, inputs[("K", source_scale)], T
                 )
                 outputs[("sample", f_i, scale)] = pix_coords
                 outputs[("color", f_i, scale)] = F.grid_sample(
-                    inputs[("color", f_i, 0)],
-                    pix_coords,
+                    inputs[("color", f_i, source_scale)],
+                    outputs[("sample", f_i, scale)],
                     padding_mode="border",
-                    align_corners=True
+                    align_corners=True,
                 )
-
                 if not self.opt.disable_automasking:
-                    outputs[("color_identity", f_i, scale)] = inputs[("color", f_i, 0)]
+                    outputs[("color_identity", f_i, scale)] = inputs[("color", f_i, source_scale)]
 
-    # -------------------------
-    # LOSSES
-    # -------------------------
     def compute_reprojection_loss(self, pred, target):
         abs_diff = torch.abs(target - pred)
         l1_loss = abs_diff.mean(1, True)
-
         if self.opt.no_ssim:
-            reprojection_loss = l1_loss
+            return l1_loss
         else:
             ssim_loss = self.ssim(pred, target).mean(1, True)
-            reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
-
-        return reprojection_loss
+            return 0.85 * ssim_loss + 0.15 * l1_loss
 
     def compute_losses(self, inputs, outputs):
-        """Compute the reprojection and smoothness losses for a minibatch.
-
-        This function follows the original monodepth2 logic: for each scale we compute
-        the photometric reprojection loss between the predicted warped images and the
-        target image at the appropriate resolution. When v1_multiscale is False, we
-        upsample all predicted disps to full resolution, but still use the low-scale
-        cameras for projection; therefore we need to use the target image at
-        ``source_scale`` for reprojection and smoothness. If v1_multiscale is True,
-        we use the same scale for both projection and target.
-
-        Args:
-            inputs: dictionary of input tensors
-            outputs: dictionary of output tensors (disps and warped colors)
-
-        Returns:
-            losses: dictionary of losses per-scale and the total loss
-        """
-        losses: dict = {}
-        total_loss = 0
-
+        """Compute the photometric reprojection and smoothness losses."""
+        losses = {}
+        total_loss = 0.0
         for scale in self.opt.scales:
-            loss = 0.0
             reprojection_losses = []
-
-            # Determine which scale of the target image to use. When v1_multiscale
-            # is False we upsample all predictions to the full resolution but still
-            # compute reprojection against the image at source_scale (0). When
-            # v1_multiscale is True, we use the same scale as the current scale.
+            # Determine the scale of the target image
             if self.opt.v1_multiscale:
                 source_scale = scale
             else:
                 source_scale = 0
-
-            # Get the target image at the correct resolution
+            # Target image at source_scale
             target = inputs[("color", 0, source_scale)]
-
-            # Compute photometric reprojection loss for each source frame
+            # Accumulate reprojection losses from each source frame
             for frame_id in self.opt.frame_ids[1:]:
-                # Skip stereo frame if present
                 if frame_id == "s":
                     continue
                 pred = outputs[("color", frame_id, scale)]
                 reprojection_losses.append(self.compute_reprojection_loss(pred, target))
-
             reprojection_losses = torch.cat(reprojection_losses, 1)
-
+            # Automasking: compare against identity reprojection
             if not self.opt.disable_automasking:
-                # Compute identity reprojection losses for automasking
-                identity_reprojection_losses = []
+                identity_losses = []
                 for frame_id in self.opt.frame_ids[1:]:
                     if frame_id == "s":
                         continue
-                    pred = inputs[("color", frame_id, source_scale)]
-                    identity_reprojection_losses.append(
-                        self.compute_reprojection_loss(pred, target)
-                    )
-                identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
-
+                    pred_id = inputs[("color", frame_id, source_scale)]
+                    identity_losses.append(self.compute_reprojection_loss(pred_id, target))
+                identity_losses = torch.cat(identity_losses, 1)
+                # Optionally average reprojection losses
                 if self.opt.avg_reprojection:
-                    identity_reprojection_losses = identity_reprojection_losses.mean(1, keepdim=True)
                     reprojection_losses = reprojection_losses.mean(1, keepdim=True)
-
-                # Add a small random noise to break ties between multiple minima
-                identity_reprojection_losses = identity_reprojection_losses + \
-                    (torch.randn_like(identity_reprojection_losses) * 1e-5)
-
-                combined = torch.cat([identity_reprojection_losses, reprojection_losses], dim=1)
-                # We take the minimum loss for each pixel across all possible
-                # identity or warped predictions. If there is only one entry we simply
-                # take that entry.
+                    identity_losses = identity_losses.mean(1, keepdim=True)
+                # Add random noise to break ties
+                identity_losses = identity_losses + (
+                    torch.randn_like(identity_losses) * 1e-5
+                )
+                combined = torch.cat([identity_losses, reprojection_losses], dim=1)
                 if combined.shape[1] == 1:
                     to_optimise = combined
                 else:
                     to_optimise, _ = torch.min(combined, dim=1, keepdim=True)
             else:
-                # No automasking: pick the minimum reprojection error across frames
+                # Without automasking, just take the minimum reprojection error
                 if self.opt.avg_reprojection:
                     reprojection_losses = reprojection_losses.mean(1, keepdim=True)
                 to_optimise, _ = torch.min(reprojection_losses, dim=1, keepdim=True)
-
-            # Average the loss over the batch
-            loss = loss + to_optimise.mean()
-
-            # Smoothness loss encourages smooth disparities
+            loss = to_optimise.mean()
+            # Smoothness loss
             disp = outputs[("disp", scale)]
             mean_disp = disp.mean(2, True).mean(3, True)
             norm_disp = disp / (mean_disp + 1e-7)
             smooth_loss = get_smooth_loss(norm_disp, target)
-            # Weight smoothness by the inverse of the scale (higher scales get smaller weight)
             loss = loss + (self.opt.disparity_smoothness * smooth_loss) / (2 ** scale)
-
             total_loss = total_loss + loss
             losses[f"loss/{scale}"] = loss.detach()
-
-        # Normalize by number of scales
         total_loss = total_loss / self.num_scales
         losses["loss"] = total_loss
         return losses
 
-    # -------------------------
-    # LOGGING
-    # -------------------------
+    def val(self):
+        self.set_eval()
+        try:
+            inputs = next(self.val_iter)
+        except StopIteration:
+            self.val_iter = iter(self.val_loader)
+            inputs = next(self.val_iter)
+        with torch.no_grad():
+            outputs, losses = self.process_batch(inputs)
+            if "depth_gt" in inputs:
+                self.compute_depth_losses(inputs, outputs, losses)
+            self.log("val", inputs, outputs, losses)
+            del inputs, outputs, losses
+        self.set_train()
+
+    # ------------------------------------------------------------------
+    # Depth metrics (optional)
+    # ------------------------------------------------------------------
+    def compute_depth_losses(self, inputs, outputs, losses):
+        depth_pred = outputs[("depth", 0, 0)]
+        depth_pred = torch.clamp(
+            F.interpolate(
+                depth_pred,
+                [375, 1242],
+                mode="bilinear",
+                align_corners=False,
+            ),
+            1e-3,
+            80,
+        )
+        depth_pred = depth_pred.detach()
+        depth_gt = inputs["depth_gt"]
+        mask = depth_gt > 0
+        crop_mask = torch.zeros_like(mask)
+        crop_mask[:, :, 153:371, 44:1197] = 1
+        mask = mask * crop_mask
+        depth_gt = depth_gt[mask]
+        depth_pred = depth_pred[mask]
+        depth_pred = depth_pred * (torch.median(depth_gt) / torch.median(depth_pred))
+        depth_pred = torch.clamp(depth_pred, min=1e-3, max=80)
+        depth_errors = utils.compute_depth_errors(depth_gt, depth_pred)
+        for i, name in enumerate(self.depth_metric_names):
+            losses[name] = float(depth_errors[i].cpu())
+
+    # ------------------------------------------------------------------
+    # Logging
+    # ------------------------------------------------------------------
     def log_time(self, batch_idx, duration, loss):
         samples_per_sec = self.opt.batch_size / duration
         time_sofar = time.time() - self.start_time
-        training_time_left = (self.num_total_steps / max(1, self.step) - 1.0) * time_sofar
+        training_time_left = (
+            self.num_total_steps / max(1, self.step) - 1.0
+        ) * time_sofar
+        print(
+            f"epoch {self.epoch+1:>3} | batch {batch_idx:>6} | examples/s: {samples_per_sec:5.1f}"
+            f" | loss: {loss.item():.5f} | time elapsed: {sec_to_hm_str(time_sofar)}"
+            f" | time left: {sec_to_hm_str(training_time_left)}"
+        )
 
-        print_string = "epoch {:>3} | batch {:>6} | examples/s: {:5.1f} | loss: {:.5f} | time elapsed: {} | time left: {}"
-        print(print_string.format(
-            self.epoch + 1, batch_idx, samples_per_sec, loss.item(),
-            sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)
-        ))
+    def log(self, mode, inputs, outputs, losses):
+        # Prepare data for wandb logging
+        log_data = {f"{mode}{k}": float(v.detach().cpu()) if torch.is_tensor(v) else float(v)
+                    for k, v in losses.items()}
+        # Pick an index for visualization
+        s = 0  # highest resolution
+        B = inputs[("color", 0, s)].shape[0]
+        viz_idx = (self.step // max(1, self.opt.log_frequency)) % B
+        img0 = inputs[("color", 0, s)][viz_idx].detach().cpu()
+        log_data[f"{mode}color/0_{s}"] = wandb.Image(img0)
+        for frame_id in self.opt.frame_ids:
+            if frame_id == 0:
+                continue
+            img_src = inputs[("color", frame_id, s)][viz_idx].detach().cpu()
+            log_data[f"{mode}color/{frame_id}_{s}"] = wandb.Image(img_src)
+            if ("color", frame_id, s) in outputs:
+                img_pred = outputs[("color", frame_id, s)][viz_idx].detach().cpu()
+                log_data[f"{mode}color_pred/{frame_id}_{s}"] = wandb.Image(img_pred)
+        disp = outputs[("disp", s)][viz_idx, 0].detach().cpu().numpy()
+        disp_vis = self.colormap(disp).transpose(1, 2, 0)
+        log_data[f"{mode}disp/{s}"] = wandb.Image(disp_vis)
+        wandb.log(log_data, step=self.step)
 
-    def log_wandb(self, losses):
-        log_dict = {}
-        for k, v in losses.items():
-            if torch.is_tensor(v):
-                log_dict[k] = float(v.detach().cpu().item())
-            else:
-                log_dict[k] = float(v)
-        wandb.log(log_dict, step=self.step)
+    # ------------------------------------------------------------------
+    # Saving and loading models
+    # ------------------------------------------------------------------
+    def save_opts(self):
+        models_dir = os.path.join(self.log_path, "models")
+        os.makedirs(models_dir, exist_ok=True)
+        to_save = self.opt.__dict__.copy()
+        with open(os.path.join(models_dir, "opt.json"), "w") as f:
+            json.dump(to_save, f, indent=2)
 
-    # -------------------------
-    # SAVE/LOAD
-    # -------------------------
     def save_model(self):
+        print("Saving models to", self.log_path)
         save_folder = os.path.join(self.log_path, "models", f"weights_{self.epoch}")
         os.makedirs(save_folder, exist_ok=True)
-
         for model_name, model in self.models.items():
             save_path = os.path.join(save_folder, f"{model_name}.pth")
             to_save = model.state_dict()
-            if model_name == "encoder" or model_name == "pose_encoder":
-                # store input size for evaluation
+            if model_name in ["encoder", "pose_encoder"]:
                 to_save = {**to_save, "height": self.opt.height, "width": self.opt.width}
             torch.save(to_save, save_path)
-
-        # save opts
-        with open(os.path.join(save_folder, "opt.json"), "w") as f:
-            json.dump(vars(self.opt), f, indent=2)
+        torch.save(self.model_optimizer.state_dict(), os.path.join(save_folder, "adam.pth"))
 
     def load_model(self):
         load_folder = self.opt.load_weights_folder
         print(f"Loading model from folder {load_folder}")
-
         for n in self.opt.models_to_load:
             if n not in self.models:
                 print(f"  [load_model] Skipping {n}: not in current model dict")
                 continue
-
+            print(f"  Loading {n} weights...")
             path = os.path.join(load_folder, f"{n}.pth")
-            if not os.path.exists(path):
-                print(f"  [load_model] Missing: {path}")
-                continue
-
             model_dict = self.models[n].state_dict()
-            pretrained_dict = torch.load(path, map_location=self.device)
-
-            # remove metadata keys
-            for meta_k in ["height", "width"]:
-                if meta_k in pretrained_dict:
-                    pretrained_dict.pop(meta_k)
-
-            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            pretrained_dict = torch.load(path)
+            pretrained_dict = {
+                k: v
+                for k, v in pretrained_dict.items()
+                if k in model_dict
+            }
             model_dict.update(pretrained_dict)
             self.models[n].load_state_dict(model_dict)
+        # Load optimizer state if available
+        opt_path = os.path.join(load_folder, "adam.pth")
+        if os.path.isfile(opt_path):
+            print("  Loading Adam state")
+            self.model_optimizer.load_state_dict(torch.load(opt_path))
+        else:
+            print("  Adam state not found; optimizer will be randomly initialized")
 
-    # -------------------------
-    # OPTIONAL: EVAL EACH EPOCH
-    # -------------------------
-    def try_eval_each_epoch(self):
-        """
-        Runs evaluate_hr_depth.py as a subprocess at the end of each epoch.
-        If it fails (e.g., missing GT), training continues.
-        """
-        weights_folder = os.path.join(self.log_path, "models", f"weights_{self.epoch}")
-        if not os.path.exists(weights_folder):
-            return
-
-        cmd = [
-            "python", "evaluate_hr_depth.py",
-            "--data_path", self.opt.data_path,
-            "--load_weights_folder", weights_folder,
-            "--eval_split", self.opt.eval_split,
-            "--eval_mono",
-        ]
-        # keep strict neighbors for hamlyn eval, if used in training
-        if getattr(self.opt, "hamlyn_strict_neighbors", False):
-            cmd += ["--hamlyn_strict_neighbors"]
-
-        print("[eval_each_epoch] Running:", " ".join(cmd))
-        try:
-            subprocess.run(cmd, check=True)
-        except Exception as e:
-            print("[eval_each_epoch] WARNING: evaluation failed:", repr(e))
+    def colormap(self, inputs, normalize=True, torch_transpose=True):
+        import matplotlib.pyplot as plt
+        _DEPTH_COLORMAP = plt.get_cmap("plasma", 256)
+        if isinstance(inputs, torch.Tensor):
+            inputs = inputs.detach().cpu().numpy()
+        vis = inputs
+        if normalize:
+            ma = float(vis.max())
+            mi = float(vis.min())
+            d = ma - mi if ma != mi else 1e5
+            vis = (vis - mi) / d
+        if vis.ndim == 4:
+            vis = vis.transpose([0, 2, 3, 1])
+            vis = _DEPTH_COLORMAP(vis)
+            vis = vis[:, :, :, 0, :3]
+            if torch_transpose:
+                vis = vis.transpose(0, 3, 1, 2)
+        elif vis.ndim == 3:
+            vis = _DEPTH_COLORMAP(vis)
+            vis = vis[:, :, :, :3]
+            if torch_transpose:
+                vis = vis.transpose(0, 3, 1, 2)
+        elif vis.ndim == 2:
+            vis = _DEPTH_COLORMAP(vis)
+            vis = vis[..., :3]
+            if torch_transpose:
+                vis = vis.transpose(2, 0, 1)
+        return vis
