@@ -76,15 +76,26 @@ class Trainer:
         self.models["encoder"] = networks.mpvit_small()
         self.models["encoder"].to(self.device)
 
-        # Explicitly set the encoder channel list for MPViT-Small.  We use
-        # the embedding dimensions defined by the architecture: the four
-        # stages have channel widths [64, 128, 216, 288], and we append the
-        # last value again to produce five feature maps.  This avoids
-        # inferring channel sizes dynamically (which can return [64, 64, 128,
-        # ...] and cause mismatches in the depth decoder) and ensures the
-        # high-resolution decoder receives the expected channel counts.
-        # See the MPViT paper Table 5 for details of the small variant.
-        self.models["encoder"].num_ch_enc = [64, 128, 216, 288, 288]
+        # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
+        # Infer the channel sizes for the encoder by passing a dummy 3‑channel
+        # tensor through the model. MPViT returns a list of feature maps,
+        # typically of length 5.  We do not modify the channel sizes except
+        # for the final entry, which may repeat the last stage's channels.
+        chs = infer_num_ch_enc(
+            self.models["encoder"], in_chans=3,
+            height=self.opt.height, width=self.opt.width,
+            device=self.device
+        )
+        # If the encoder returns fewer than 5 feature maps, replicate the last
+        # channel count so that the decoder has a consistent number of levels.
+        if len(chs) < 5:
+            last = chs[-1]
+            chs += [last] * (5 - len(chs))
+        # Ensure the final stage has the same channel count as the previous
+        # stage if the encoder does not increase it further.
+        if len(chs) >= 5 and chs[4] != chs[3]:
+            chs[4] = chs[3]
+        self.models["encoder"].num_ch_enc = chs
 
         # Depth decoder
         from networks.hr_decoder import DepthDecoderT
@@ -107,10 +118,22 @@ class Trainer:
             # receiving 6‑channel input.
             self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
             self.models["pose_encoder"].to(self.device)
-            # Explicitly set the channel list for the pose encoder.  As with
-            # the depth encoder, we avoid inferring channels dynamically and
-            # assign the MPViT-Small dimensions [64, 128, 216, 288, 288].
-            self.models["pose_encoder"].num_ch_enc = [64, 128, 216, 288, 288]
+            # Infer the channel sizes for the pose encoder. Use in_chans=6 to
+            # match the input.  MPViT returns a list of feature maps; if
+            # fewer than 5 are returned, replicate the last channel count.
+            chs_pose = infer_num_ch_enc(
+                self.models["pose_encoder"], in_chans=6,
+                height=self.opt.height, width=self.opt.width,
+                device=self.device
+            )
+            if len(chs_pose) < 5:
+                last = chs_pose[-1]
+                chs_pose += [last] * (5 - len(chs_pose))
+            # Ensure the final stage has the same channel count as the previous
+            # stage if the encoder does not increase it further.
+            if len(chs_pose) >= 5 and chs_pose[4] != chs_pose[3]:
+                chs_pose[4] = chs_pose[3]
+            self.models["pose_encoder"].num_ch_enc = chs_pose
             self.models["pose"] = networks.PoseDecoder(
                 self.models["pose_encoder"].num_ch_enc,
                 num_input_features=1,
