@@ -164,11 +164,19 @@ class Trainer:
         # ------------------------------------------------------------------
         # Datasets and dataloaders
         # ------------------------------------------------------------------
+        # Define dataset mapping. Include 'hamlyn' for HamlynDataset support.
+        # Hamlyn dataset is used for endoscopy or Hamlyn-specific depth data.
         datasets_dict = {
             "kitti": datasets.KITTIRAWDataset,
             "kitti_odom": datasets.KITTIOdomDataset,
             "endovis": datasets.SCAREDDataset,
+            "hamlyn": datasets.HamlynDataset if hasattr(datasets, "HamlynDataset") else None,
         }
+        if self.opt.dataset not in datasets_dict or datasets_dict[self.opt.dataset] is None:
+            raise KeyError(
+                f"Dataset '{self.opt.dataset}' not found in datasets_dict. "
+                "Please ensure it is implemented in the datasets package."
+            )
         self.dataset = datasets_dict[self.opt.dataset]
 
         fpath = os.path.join(
