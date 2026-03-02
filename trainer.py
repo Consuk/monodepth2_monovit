@@ -351,7 +351,7 @@ class Trainer:
                 outputs[("axisangle", 0, f_i)] = axisangle
                 outputs[("translation", 0, f_i)] = translation
 
-                outputs[("cam_T_cam", 0, f_i)] = networks.transformation_from_parameters(
+                outputs[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
                     axisangle[:, 0], translation[:, 0], invert=(f_i < 0)
                 )
 
