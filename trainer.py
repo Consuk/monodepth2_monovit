@@ -74,7 +74,7 @@ class Trainer:
         # Use mpvit_small to build the encoder instead of mpvit_tiny. This
         # function is imported from mpvit.py and returns a MPViT-small model.
         self.models["encoder"] = networks.mpvit_small()
-        self.models["encoder"].to(self.device)
+        self.models["encoder"].num_ch_enc = [64, 128, 216, 288, 288]
 
         # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
         # Infer the channel sizes for the encoder by passing a dummy 3‑channel
@@ -125,7 +125,7 @@ class Trainer:
             # in_chans=6, the encoder defaults to 3 channels and fails when
             # receiving 6‑channel input.
             self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
-            self.models["pose_encoder"].to(self.device)
+            self.models["pose_encoder"].num_ch_enc = [64, 128, 216, 288, 288]
             # Infer the channel sizes for the pose encoder. Use in_chans=6 to
             # match the input and preserve the dynamic channel sizes of MPViT.
             chs_pose = infer_num_ch_enc(
