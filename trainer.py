@@ -78,21 +78,22 @@ class Trainer:
 
         # Infer encoder channels AFTER moving to device to avoid CPU/GPU dtype mismatch
         # Infer the channel sizes for the encoder by passing a dummy 3‑channel
-        # tensor through the model. MPViT returns a list of feature maps,
-        # typically of length 5.  We do not modify the channel sizes except
-        # for the final entry, which may repeat the last stage's channels.
+        # tensor through the model. MPViT returns a list of feature maps.
+        # We do not modify the channels except to ensure there are five entries
+        # (repeat the last channel if needed) and to replicate the last stage
+        # channel if it differs from the previous stage.
         chs = infer_num_ch_enc(
             self.models["encoder"], in_chans=3,
             height=self.opt.height, width=self.opt.width,
             device=self.device
         )
-        # If the encoder returns fewer than 5 feature maps, replicate the last
-        # channel count so that the decoder has a consistent number of levels.
+        # If fewer than 5 feature maps are returned, replicate the last entry
+        # to satisfy the decoder's expectation.
         if len(chs) < 5:
             last = chs[-1]
-            chs += [last] * (5 - len(chs))
-        # Ensure the final stage has the same channel count as the previous
-        # stage if the encoder does not increase it further.
+            chs = chs + [last] * (5 - len(chs))
+        # Ensure the final stage has the same channel count as the previous stage
+        # if the encoder does not increase it further.
         if len(chs) >= 5 and chs[4] != chs[3]:
             chs[4] = chs[3]
         self.models["encoder"].num_ch_enc = chs
@@ -119,18 +120,19 @@ class Trainer:
             self.models["pose_encoder"] = networks.mpvit_small(in_chans=6)
             self.models["pose_encoder"].to(self.device)
             # Infer the channel sizes for the pose encoder. Use in_chans=6 to
-            # match the input.  MPViT returns a list of feature maps; if
-            # fewer than 5 are returned, replicate the last channel count.
+            # match the input.  MPViT returns a list of feature maps.
             chs_pose = infer_num_ch_enc(
                 self.models["pose_encoder"], in_chans=6,
                 height=self.opt.height, width=self.opt.width,
                 device=self.device
             )
+            # If fewer than 5 feature maps are returned, replicate the last entry
+            # to satisfy the decoder's expectation.
             if len(chs_pose) < 5:
                 last = chs_pose[-1]
-                chs_pose += [last] * (5 - len(chs_pose))
-            # Ensure the final stage has the same channel count as the previous
-            # stage if the encoder does not increase it further.
+                chs_pose = chs_pose + [last] * (5 - len(chs_pose))
+            # Ensure the final stage has the same channel count as the previous stage
+            # if the encoder does not increase it further.
             if len(chs_pose) >= 5 and chs_pose[4] != chs_pose[3]:
                 chs_pose[4] = chs_pose[3]
             self.models["pose_encoder"].num_ch_enc = chs_pose
