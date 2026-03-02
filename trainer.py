@@ -106,13 +106,12 @@ class Trainer:
         self.models["encoder"].num_ch_enc = chs
 
         # Depth decoder
-        from networks.hr_decoder import DepthDecoderT
-        self.models["depth"] = DepthDecoderT(
-            ch_enc=self.models["encoder"].num_ch_enc,      # canales del encoder
+        self.models["depth"] = networks.DepthDecoder(
+            num_ch_enc=self.models["encoder"].num_ch_enc,
             scales=self.opt.scales,
-            num_ch_enc=self.models["encoder"].num_ch_enc,  # lista de canales para skip connections
-            num_output_channels=1
-        )
+            num_output_channels=1,
+            use_skips=True
+        ).to(self.device)
         self.models["depth"].to(self.device)
 
         # Pose network
