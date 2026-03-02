@@ -107,8 +107,11 @@ class Trainer:
 
         # Depth decoder
         self.models["depth"] = networks.DepthDecoder(
-            self.models["encoder"].num_ch_enc,
-            scales=range(4))
+            num_ch_enc=self.models["encoder"].num_ch_enc,
+            scales=self.opt.scales,
+            num_output_channels=1,
+            use_skips=True
+        )
         self.models["depth"].to(self.device)
 
         # Pose network
