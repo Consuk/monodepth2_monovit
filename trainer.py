@@ -378,10 +378,12 @@ class Trainer:
                     continue
 
                 T = outputs[("cam_T_cam", 0, f_i)]
-                cam_points = self.backproject_depth[scale](
+                proj_scale = scale if self.opt.v1_multiscale else 0
+
+                cam_points = self.backproject_depth[proj_scale](
                     depth, inputs[("inv_K", 0)]
                 )
-                pix_coords = self.project_3d[scale](
+                pix_coords = self.project_3d[proj_scale](
                     cam_points, inputs[("K", 0)], T
                 )
                 outputs[("sample", f_i, scale)] = pix_coords
