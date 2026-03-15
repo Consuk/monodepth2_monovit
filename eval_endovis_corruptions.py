@@ -9,6 +9,7 @@ from collections import defaultdict
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import networks
 import datasets
@@ -28,11 +29,8 @@ def compute_errors(gt, pred):
     a3 = (thresh < 1.25 ** 3).mean()
 
     rmse = np.sqrt(((gt - pred) ** 2).mean())
-    rmse_log = np.sqrt(((np.log(gt) - pred.__array_priority__ * 0 + np.log(pred)) ** 2).mean())  # se corrige abajo
     abs_rel = np.mean(np.abs(gt - pred) / gt)
     sq_rel = np.mean(((gt - pred) ** 2) / gt)
-
-    # corrección explícita para evitar cualquier rareza
     rmse_log = np.sqrt(((np.log(gt) - np.log(pred)) ** 2).mean())
 
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
@@ -49,56 +47,53 @@ def describe_tensor(x, name="tensor"):
     return f"{name}: type={type(x)}"
 
 
-def load_model(load_weights_folder, num_layers, device, debug=False):
+def load_model(load_weights_folder, device, opt):
     """
-    Carga encoder y decoder de MonoIIT una sola vez.
-    num_layers se conserva por compatibilidad, aunque mpvit_small no lo use.
+    Carga MonoViT exactamente como en evaluate_hr_depth.py
     """
+    print(f"-> Cargando modelo MonoViT desde: {load_weights_folder}")
+
     encoder_path = os.path.join(load_weights_folder, "encoder.pth")
     decoder_path = os.path.join(load_weights_folder, "depth.pth")
 
-    if not os.path.isdir(load_weights_folder):
-        raise FileNotFoundError(f"No existe la carpeta de pesos: {load_weights_folder}")
     if not os.path.isfile(encoder_path):
-        raise FileNotFoundError(f"No existe {encoder_path}")
+        raise FileNotFoundError(f"No se encontró encoder.pth en: {encoder_path}")
     if not os.path.isfile(decoder_path):
-        raise FileNotFoundError(f"No existe {decoder_path}")
-
-    debug_print(debug, f"[DEBUG] device = {device}")
-    debug_print(debug, f"[DEBUG] encoder_path = {encoder_path}")
-    debug_print(debug, f"[DEBUG] decoder_path = {decoder_path}")
-
-    # ===== MonoIIT backbone =====
-    encoder = networks.mpvit_small()
-    encoder.num_ch_enc = [64, 128, 216, 288, 288]
-    depth_decoder = networks.DepthDecoderT()
+        raise FileNotFoundError(f"No se encontró depth.pth en: {decoder_path}")
 
     encoder_dict = torch.load(encoder_path, map_location=device)
+
+    # Si el checkpoint trae height/width, se usan; si no, usa args
+    height = int(encoder_dict.get("height", getattr(opt, "height", 192)))
+    width = int(encoder_dict.get("width", getattr(opt, "width", 640)))
+
+    # ===== Encoder MonoViT =====
+    encoder = networks.mpvit_small()
+    encoder.num_ch_enc = [64, 128, 216, 288, 288]
+    encoder = encoder.to(device)
+
+    model_dict = encoder.state_dict()
+    filtered_encoder_dict = {
+        k: v for k, v in encoder_dict.items()
+        if k in model_dict
+    }
+    model_dict.update(filtered_encoder_dict)
+    encoder.load_state_dict(model_dict)
+
+    # ===== Decoder MonoViT =====
+    depth_decoder = networks.DepthDecoder(
+        encoder.num_ch_enc,
+        scales=opt.scales
+    )
+    depth_decoder = depth_decoder.to(device)
+
     decoder_dict = torch.load(decoder_path, map_location=device)
-
-    encoder_state = encoder.state_dict()
-    filtered_dict = {k: v for k, v in encoder_dict.items() if k in encoder_state}
-
-    missing_in_ckpt = [k for k in encoder_state.keys() if k not in encoder_dict]
-    extra_in_ckpt = [k for k in encoder_dict.keys() if k not in encoder_state]
-
-    debug_print(debug, f"[DEBUG] encoder ckpt keys = {len(encoder_dict)}")
-    debug_print(debug, f"[DEBUG] encoder model keys = {len(encoder_state)}")
-    debug_print(debug, f"[DEBUG] encoder matched keys = {len(filtered_dict)}")
-    debug_print(debug, f"[DEBUG] encoder missing keys (first 10) = {missing_in_ckpt[:10]}")
-    debug_print(debug, f"[DEBUG] encoder extra keys (first 10) = {extra_in_ckpt[:10]}")
-    debug_print(debug, f"[DEBUG] depth_decoder ckpt keys = {len(decoder_dict)}")
-
-    encoder.load_state_dict(filtered_dict, strict=False)
     depth_decoder.load_state_dict(decoder_dict)
 
-    encoder.to(device).eval()
-    depth_decoder.to(device).eval()
+    encoder.eval()
+    depth_decoder.eval()
 
-    debug_print(debug, f"[DEBUG] Encoder class = {encoder.__class__.__name__}")
-    debug_print(debug, f"[DEBUG] Decoder class = {depth_decoder.__class__.__name__}")
-
-    return encoder, depth_decoder
+    return encoder, depth_decoder, height, width
 
 
 def build_dataset(dataset_name, data_path_root, filenames, height, width, png=False):
@@ -216,13 +211,16 @@ def evaluate_one_root(
                     f"Tipo de salida: {type(outputs)}"
                 )
 
-            pred_disp, _ = disp_to_depth(outputs[("disp", 0)], min_depth, max_depth)
+            disp = outputs[("disp", 0)]
+
+            # Mantener lógica MonoViT
+            scaled_disp, _ = disp_to_depth(disp, min_depth, max_depth)
 
             if debug and not first_forward_done:
-                print("[DEBUG] " + describe_tensor(pred_disp, "pred_disp_after_disp_to_depth"))
+                print("[DEBUG] " + describe_tensor(scaled_disp, "scaled_disp_after_disp_to_depth"))
                 first_forward_done = True
 
-            preds_list.append(pred_disp[:, 0].cpu().numpy())
+            preds_list.append(scaled_disp[:, 0].cpu().numpy())
 
     missing = 0
     total = len(filenames)
@@ -383,7 +381,7 @@ def save_csv(path, header, rows):
 
 
 def main():
-    parser = argparse.ArgumentParser("Evaluate Hamlyn/EndoVIS corruptions with MonoIIT + debug")
+    parser = argparse.ArgumentParser("Evaluate Hamlyn/EndoVIS corruptions with MonoViT + debug")
 
     parser.add_argument("--corruptions_root", type=str, required=True,
                         help="Raíz de corrupciones o carpeta de una corrupción")
@@ -425,6 +423,10 @@ def main():
     parser.add_argument("--global_avg_filename", type=str, default="global_average.csv",
                         help="Nombre del CSV con promedio global")
 
+    # importante para MonoViT
+    parser.add_argument("--scales", nargs="+", type=int, default=[0, 1, 2, 3],
+                        help="Scales del decoder de MonoViT")
+
     args = parser.parse_args()
 
     cv2.setNumThreads(0)
@@ -460,13 +462,15 @@ def main():
     disable_median_scaling = args.eval_stereo
     pred_depth_scale_factor = STEREO_SCALE_FACTOR if args.eval_stereo else 1.0
 
-    print("-> Cargando modelo MonoIIT desde:", args.load_weights_folder)
-    encoder, depth_decoder = load_model(
+    encoder, depth_decoder, model_height, model_width = load_model(
         args.load_weights_folder,
-        args.num_layers,
         device,
-        debug=args.debug
+        args
     )
+
+    # usar tamaño del checkpoint/modelo, no args.height/width si difieren
+    eval_height = model_height
+    eval_width = model_width
 
     corr_dirs = list_corruption_dirs(args.corruptions_root)
     if len(corr_dirs) == 0:
@@ -519,8 +523,8 @@ def main():
                     encoder=encoder,
                     depth_decoder=depth_decoder,
                     dataset_name=args.dataset,
-                    height=args.height,
-                    width=args.width,
+                    height=eval_height,
+                    width=eval_width,
                     batch_size=args.batch_size,
                     png=args.png,
                     disable_median_scaling=disable_median_scaling,
