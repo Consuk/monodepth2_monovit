@@ -6,18 +6,30 @@ except Exception:
     KITTIOdomDataset = None
     KITTIDepthDataset = None
 
-from .scared_dataset import SCAREDDataset, SCAREDRAWDataset
-from .hamlyn_dataset import HamlynDataset
+try:
+    from .scared_dataset import SCAREDDataset, SCAREDRAWDataset
+except Exception:
+    # SCARED depends on optional scientific stack in some environments.
+    SCAREDDataset = None
+    SCAREDRAWDataset = None
+
+try:
+    from .hamlyn_dataset import HamlynDataset
+except Exception:
+    HamlynDataset = None
 
 try:
     from .c3vd_dataset import C3VDDataset
 except Exception:
     C3VDDataset = None
 
-dataset_dict = {
-    "endovis": SCAREDRAWDataset,
-    "hamlyn": HamlynDataset,
-}
+dataset_dict = {}
+
+if SCAREDRAWDataset is not None:
+    dataset_dict["endovis"] = SCAREDRAWDataset
+
+if HamlynDataset is not None:
+    dataset_dict["hamlyn"] = HamlynDataset
 
 if C3VDDataset is not None:
     dataset_dict["c3vd"] = C3VDDataset
