@@ -215,6 +215,15 @@ class Trainer:
         dataset_kwargs = {}
         if self.opt.dataset == "c3vd":
             dataset_kwargs["intrinsics_file"] = getattr(self.opt, "c3vd_intrinsics_file", None)
+            dataset_kwargs["use_loss_mask"] = bool(getattr(self.opt, "c3vd_use_loss_mask", False))
+            dataset_kwargs["mask_filename"] = getattr(self.opt, "c3vd_mask_filename", "mask.png")
+            dataset_kwargs["mask_erosion"] = int(getattr(self.opt, "c3vd_mask_erosion", 0))
+            if dataset_kwargs["use_loss_mask"]:
+                print(
+                    "[c3vd] Loss mask enabled: "
+                    f"mask_filename={dataset_kwargs['mask_filename']}, "
+                    f"erosion={dataset_kwargs['mask_erosion']}"
+                )
 
         num_train_samples = len(train_filenames)
         self.num_total_steps = (
@@ -561,6 +570,7 @@ class Trainer:
                 source_scale = scale
             else:
                 source_scale = 0
+            valid_mask = inputs.get(("valid_mask", 0, source_scale), None)
             # Target image at source_scale
             target = inputs[("color", 0, source_scale)]
             # Accumulate reprojection losses from each source frame
@@ -570,6 +580,8 @@ class Trainer:
                 pred = outputs[("color", frame_id, scale)]
                 reprojection_losses.append(self.compute_reprojection_loss(pred, target))
             reprojection_losses = torch.cat(reprojection_losses, 1)
+            if valid_mask is not None:
+                reprojection_losses = reprojection_losses * valid_mask
             # Automasking: compare against identity reprojection
             if not self.opt.disable_automasking:
                 identity_losses = []
@@ -579,6 +591,8 @@ class Trainer:
                     pred_id = inputs[("color", frame_id, source_scale)]
                     identity_losses.append(self.compute_reprojection_loss(pred_id, target))
                 identity_losses = torch.cat(identity_losses, 1)
+                if valid_mask is not None:
+                    identity_losses = identity_losses * valid_mask
                 # Optionally average reprojection losses
                 if self.opt.avg_reprojection:
                     reprojection_losses = reprojection_losses.mean(1, keepdim=True)
@@ -597,7 +611,17 @@ class Trainer:
                 if self.opt.avg_reprojection:
                     reprojection_losses = reprojection_losses.mean(1, keepdim=True)
                 to_optimise, _ = torch.min(reprojection_losses, dim=1, keepdim=True)
-            loss = to_optimise.mean()
+            if valid_mask is not None:
+                if to_optimise.dim() == 4:
+                    to_opt_map = to_optimise[:, 0, :, :]
+                else:
+                    to_opt_map = to_optimise
+                mask2d = valid_mask[:, 0, :, :]
+                denom = mask2d.sum() + 1e-7
+                photometric_loss = (to_opt_map * mask2d).sum() / denom
+            else:
+                photometric_loss = to_optimise.mean()
+            loss = photometric_loss
             # Smoothness loss
             disp = outputs[("disp", scale)]
             mean_disp = disp.mean(2, True).mean(3, True)

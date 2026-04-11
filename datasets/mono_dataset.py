@@ -65,29 +65,42 @@ class MonoDataset(data.Dataset):
 
         # Precompute resized image transforms for each scale
         self.resize = {}
+        self.resize_mask = {}
         for i in range(self.num_scales):
             s = 2 ** i
             self.resize[i] = transforms.Resize((self.height // s, self.width // s), interpolation=self.interp)
+            self.resize_mask[i] = transforms.Resize(
+                (self.height // s, self.width // s),
+                interpolation=Image.Resampling.NEAREST,
+            )
 
         self.load_depth = self.check_depth()
 
     def preprocess(self, inputs, color_aug):
         """Resize color images to required scales and apply data augmentation."""
         for k in list(inputs):
-            if "color" in k:
+            if isinstance(k, tuple) and len(k) == 3 and k[0] == "color":
                 n, img_id, intr = k
                 # resize original (scale -1) to all scales
                 for i in range(self.num_scales):
                     inputs[(n, img_id, i)] = self.resize[i](inputs[(n, img_id, i - 1)])
+            elif isinstance(k, tuple) and len(k) == 3 and k[0] == "valid_mask":
+                n, img_id, intr = k
+                for i in range(self.num_scales):
+                    inputs[(n, img_id, i)] = self.resize_mask[i](inputs[(n, img_id, i - 1)])
         for k in list(inputs):
             f = inputs[k]
-            if "color" in k:
+            if isinstance(k, tuple) and len(k) == 3 and k[0] == "color":
                 n, img_id, i = k
                 inputs[(n, img_id, i)] = self.to_tensor(f)
                 if inputs[(n, img_id, i)].sum() == 0:
                     inputs[(n + "_aug", img_id, i)] = inputs[(n, img_id, i)]
                 else:
                     inputs[(n + "_aug", img_id, i)] = self.to_tensor(color_aug(f))
+            elif isinstance(k, tuple) and len(k) == 3 and k[0] == "valid_mask":
+                n, img_id, i = k
+                m = self.to_tensor(f)
+                inputs[(n, img_id, i)] = (m > 0.5).float()
 
     def __len__(self):
         return len(self.filenames)
@@ -153,6 +166,9 @@ class MonoDataset(data.Dataset):
             inputs[("K", scale)] = torch.from_numpy(K)
             inputs[("inv_K", scale)] = torch.from_numpy(inv_K)
 
+        if getattr(self, "load_valid_mask", False):
+            inputs[("valid_mask", 0, -1)] = self.get_valid_mask(folder, frame_index, side, do_flip)
+
         # Apply data augmentation (if any)
         if do_color_aug:
             color_aug = transforms.ColorJitter(
@@ -165,6 +181,8 @@ class MonoDataset(data.Dataset):
         for i in self.frame_idxs:
             del inputs[("color", i, -1)]
             del inputs[("color_aug", i, -1)]
+        if ("valid_mask", 0, -1) in inputs:
+            del inputs[("valid_mask", 0, -1)]
         return inputs
 
     def get_color(self, folder, frame_index, side, do_flip):
@@ -174,4 +192,7 @@ class MonoDataset(data.Dataset):
         raise NotImplementedError
 
     def get_depth(self, folder, frame_index, side, do_flip):
+        raise NotImplementedError
+
+    def get_valid_mask(self, folder, frame_index, side, do_flip):
         raise NotImplementedError
