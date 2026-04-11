@@ -1,24 +1,28 @@
-from .kitti_dataset import KITTIRAWDataset, KITTIOdomDataset, KITTIDepthDataset
-from .scared_dataset import SCAREDDataset
-from .scared_dataset import SCAREDRAWDataset
+try:
+    from .kitti_dataset import KITTIRAWDataset, KITTIOdomDataset, KITTIDepthDataset
+except Exception:
+    # Keep non-KITTI datasets usable when optional KITTI deps are missing.
+    KITTIRAWDataset = None
+    KITTIOdomDataset = None
+    KITTIDepthDataset = None
 
-"""
-Expose dataset classes at the package level for convenience.
-
-By importing the dataset classes here, users can do::
-
-    from yourpackage import SCAREDRAWDataset, HamlynDataset
-
-without needing to know the underlying file structure.  Adding
-additional datasets in this file makes them available from the top level.
-"""
-
-# Import datasets so they are available at the package root.  When
-# adding new datasets, import them here and update ``__all__`` below.
-from .scared_dataset import SCAREDRAWDataset
+from .scared_dataset import SCAREDDataset, SCAREDRAWDataset
 from .hamlyn_dataset import HamlynDataset
+
+try:
+    from .c3vd_dataset import C3VDDataset
+except Exception:
+    C3VDDataset = None
 
 dataset_dict = {
     "endovis": SCAREDRAWDataset,
-    "hamlyn": HamlynDataset
+    "hamlyn": HamlynDataset,
 }
+
+if C3VDDataset is not None:
+    dataset_dict["c3vd"] = C3VDDataset
+
+if KITTIRAWDataset is not None:
+    dataset_dict["kitti"] = KITTIRAWDataset
+    dataset_dict["kitti_odom"] = KITTIOdomDataset
+    dataset_dict["kitti_depth"] = KITTIDepthDataset

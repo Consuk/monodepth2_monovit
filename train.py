@@ -13,12 +13,37 @@ options = MonodepthOptions()
 opts = options.parse()
 
 import torch
-torch.cuda.set_per_process_memory_fraction(0.85, 0)  # Use only 85% of GPU memory
+if torch.cuda.is_available():
+    torch.cuda.set_per_process_memory_fraction(0.85, 0)  # Use only 85% of GPU memory
+
+
+def init_wandb(opt):
+    try:
+        import wandb
+    except Exception:
+        return None
+
+    kwargs = {
+        "project": opt.wandb_project,
+        "mode": opt.wandb_mode,
+        "config": vars(opt),
+    }
+    if opt.wandb_entity:
+        kwargs["entity"] = opt.wandb_entity
+    if opt.wandb_name:
+        kwargs["name"] = opt.wandb_name
+    if opt.wandb_tags:
+        kwargs["tags"] = opt.wandb_tags
+
+    return wandb.init(**kwargs)
 
 
 if __name__ == "__main__":
-    import wandb
-    wandb.init(project="Monodepth2_monovit")
-    trainer = Trainer(opts)
-    trainer.train()
+    run = init_wandb(opts)
+    try:
+        trainer = Trainer(opts)
+        trainer.train()
+    finally:
+        if run is not None:
+            run.finish()
 

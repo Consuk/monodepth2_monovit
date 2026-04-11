@@ -18,6 +18,10 @@ class MonodepthOptions:
                                  type=str,
                                  help="log directory",
                                  default=os.path.join(os.path.expanduser("~"), "tmp"))
+        self.parser.add_argument("--split_root",
+                                 type=str,
+                                 default=None,
+                                 help="optional root directory containing split folders (default: <repo>/splits)")
 
         # TRAINING options
         self.parser.add_argument("--model_name",
@@ -27,7 +31,7 @@ class MonodepthOptions:
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "endovis", "hamlyn"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "endovis", "hamlyn", "c3vd"],
                                  default="eigen_zhou")
         self.parser.add_argument("--num_layers",
                                  type=int,
@@ -38,7 +42,7 @@ class MonodepthOptions:
                                  type=str,
                                  help="dataset to train on",
                                  default="endovis",
-                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "endovis", "hamlyn"])
+                                 choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test", "endovis", "hamlyn", "c3vd"])
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
                                  action="store_true")
@@ -75,6 +79,10 @@ class MonodepthOptions:
                                  type=int,
                                  help="frames to load",
                                  default=[0, -1, 1])
+        self.parser.add_argument("--c3vd_intrinsics_file",
+                                 type=str,
+                                 default=None,
+                                 help="optional path to a C3VD intrinsics file; fixed normalized K is used if missing")
 
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size",
@@ -154,6 +162,28 @@ class MonodepthOptions:
                                  type=int,
                                  help="number of epochs between each save",
                                  default=1)
+        self.parser.add_argument("--wandb_project",
+                                 type=str,
+                                 default="Monodepth2_monovit",
+                                 help="Weights & Biases project name")
+        self.parser.add_argument("--wandb_entity",
+                                 type=str,
+                                 default=None,
+                                 help="optional W&B entity/team")
+        self.parser.add_argument("--wandb_name",
+                                 type=str,
+                                 default=None,
+                                 help="optional W&B run name")
+        self.parser.add_argument("--wandb_mode",
+                                 type=str,
+                                 default="online",
+                                 choices=["online", "offline", "disabled"],
+                                 help="W&B mode")
+        self.parser.add_argument("--wandb_tags",
+                                 nargs="+",
+                                 type=str,
+                                 default=[],
+                                 help="optional W&B tags")
 
         # EVALUATION options
         self.parser.add_argument("--eval_stereo",
@@ -172,10 +202,18 @@ class MonodepthOptions:
         self.parser.add_argument("--ext_disp_to_eval",
                                  type=str,
                                  help="optional path to a .npy disparities file to evaluate")
+        self.parser.add_argument("--eval_filelist",
+                                 type=str,
+                                 default=None,
+                                 help="optional path to a custom eval file list")
+        self.parser.add_argument("--gt_depths_path",
+                                 type=str,
+                                 default=None,
+                                 help="optional path to a custom gt_depths.npz")
         self.parser.add_argument("--eval_split",
                                  type=str,
                                  default="SERV-CT",
-                                 choices=["eigen", "eigen_benchmark", "benchmark", "odom_9", "odom_10", "endovis", "hamlyn", "SERV-CT"],
+                                 choices=["eigen", "eigen_benchmark", "benchmark", "odom_9", "odom_10", "endovis", "hamlyn", "SERV-CT", "c3vd"],
                                  help="which split to run eval on")
         self.parser.add_argument("--save_pred_disps",
                                  help="if set saves predicted disparities",
@@ -192,6 +230,14 @@ class MonodepthOptions:
         self.parser.add_argument("--post_process",
                                  help="if set will perform flipping post-processing as in Monodepth v1",
                                  action="store_true")
+        self.parser.add_argument("--c3vd_eval_min_depth",
+                                 type=float,
+                                 default=0.1,
+                                 help="minimum depth for C3VD evaluation mask (mm)")
+        self.parser.add_argument("--c3vd_eval_max_depth",
+                                 type=float,
+                                 default=100.0,
+                                 help="maximum depth for C3VD evaluation mask (mm)")
         # EXTRA: TRAIN-TIME EVALUATION
         self.parser.add_argument("--eval_each_epoch",
                                  help="if set, runs evaluation at the end of every epoch (if ground truth available)",

@@ -1,303 +1,341 @@
 from __future__ import absolute_import, division, print_function
 
 import os
-import cv2
 import numpy as np
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
+from PIL import Image
 
 import torch
 from torch.utils.data import DataLoader
 
-from layers import disp_to_depth
-from utils import readlines
-from options import MonodepthOptions
 import datasets
 import networks
-from layers import *
-from utils import *
+from layers import disp_to_depth
+from options import MonodepthOptions
+from utils import readlines, resolve_split_dir
 
 import matplotlib.pyplot as plt
 
-import wandb
-from networks.mpvit import mpvit_small
+try:
+    import wandb
+except Exception:
+    wandb = None
 
+_DEPTH_COLORMAP = plt.get_cmap("plasma", 256)
 
-
-wandb.init(project="iilDepth-Testing")
-
-_DEPTH_COLORMAP = plt.get_cmap('plasma', 256)  # for plotting
-
-
-cv2.setNumThreads(0)  # This speeds up evaluation 5x on our unix systems (OpenCV 3.3.1)
-
+if cv2 is not None:
+    cv2.setNumThreads(0)
 
 splits_dir = os.path.join(os.path.dirname(__file__), "splits")
 
-# Models which were trained with stereo supervision were trained with a nominal
-# baseline of 0.1 units. The KITTI rig has a baseline of 54cm. Therefore,
-# to convert our stereo predictions to real-world scale we multiply our depths by 5.4.
+# Models trained with stereo supervision used a nominal baseline of 0.1.
+# KITTI baseline is 54cm, so scale by 5.4 for stereo eval.
 STEREO_SCALE_FACTOR = 5.4
 
-def disp_to_depth(disp, min_depth, max_depth):
-    """Convert network's sigmoid output into depth prediction
-    The formula for this conversion is given in the 'additional considerations'
-    section of the paper.
-    """
-    min_disp = 1 / max_depth
-    max_disp = 1 / min_depth
-    scaled_disp = min_disp + (max_disp - min_disp) * disp
-    depth = 1 / scaled_disp
-    return scaled_disp, depth
 
 def compute_errors(gt, pred):
-    """Computation of error metrics between predicted and ground truth depths
-    """
+    gt = np.asarray(gt, dtype=np.float64)
+    pred = np.asarray(pred, dtype=np.float64)
+
+    eps = 1e-6
+    gt = np.clip(gt, eps, None)
+    pred = np.clip(pred, eps, None)
+
     thresh = np.maximum((gt / pred), (pred / gt))
-    
-    a1 = (thresh < 1.25     ).mean()
+
+    a1 = (thresh < 1.25).mean()
     a2 = (thresh < 1.25 ** 2).mean()
     a3 = (thresh < 1.25 ** 3).mean()
 
-    rmse = (gt - pred) ** 2
-    rmse = np.sqrt(rmse.mean())
-
-    rmse_log = (np.log(gt) - np.log(pred)) ** 2
-    rmse_log = np.sqrt(rmse_log.mean())
+    rmse = np.sqrt(((gt - pred) ** 2).mean())
+    rmse_log = np.sqrt(((np.log(gt) - np.log(pred)) ** 2).mean())
 
     abs_rel = np.mean(np.abs(gt - pred) / gt)
-
     sq_rel = np.mean(((gt - pred) ** 2) / gt)
 
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
 
 
-def batch_post_process_disparity(l_disp, r_disp):
-    """Apply the disparity post-processing method as introduced in Monodepthv1
-    """
-    _, h, w = l_disp.shape
-    m_disp = 0.5 * (l_disp + r_disp)
-    l, _ = np.meshgrid(np.linspace(0, 1, w), np.linspace(0, 1, h))
-    l_mask = (1.0 - np.clip(20 * (l - 0.05), 0, 1))[None, ...]
-    r_mask = l_mask[:, :, ::-1]
-    return r_mask * l_disp + l_mask * r_disp + (1.0 - l_mask - r_mask) * m_disp
+def resize_2d(array_2d, out_w, out_h):
+    if cv2 is not None:
+        return cv2.resize(array_2d, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+
+    pil_img = Image.fromarray(np.asarray(array_2d, dtype=np.float32), mode="F")
+    pil_img = pil_img.resize((out_w, out_h), Image.BILINEAR)
+    return np.array(pil_img, dtype=np.float32)
 
 
-def evaluate(opt):
-    """Evaluates a pretrained model using a specified test set
-    """
-    MIN_DEPTH = 1e-3
-    MAX_DEPTH = 150
+def colormap(inputs, normalize=True, torch_transpose=True):
+    if isinstance(inputs, torch.Tensor):
+        inputs = inputs.detach().cpu().numpy()
 
-    assert sum((opt.eval_mono, opt.eval_stereo)) == 1, \
-        "Please choose mono or stereo evaluation by setting either --eval_mono or --eval_stereo"
+    vis = inputs
+    if normalize:
+        ma = float(vis.max())
+        mi = float(vis.min())
+        d = ma - mi if ma != mi else 1e-5
+        vis = (vis - mi) / d
 
-    if opt.ext_disp_to_eval is None:
+    if vis.ndim == 4:
+        vis = vis.transpose([0, 2, 3, 1])
+        vis = _DEPTH_COLORMAP(vis)
+        vis = vis[:, :, :, 0, :3]
+        if torch_transpose:
+            vis = vis.transpose(0, 3, 1, 2)
+    elif vis.ndim == 3:
+        vis = _DEPTH_COLORMAP(vis)
+        vis = vis[:, :, :, :3]
+        if torch_transpose:
+            vis = vis.transpose(0, 3, 1, 2)
+    elif vis.ndim == 2:
+        vis = _DEPTH_COLORMAP(vis)
+        vis = vis[..., :3]
+        if torch_transpose:
+            vis = vis.transpose(2, 0, 1)
+
+    return vis
+
+
+def build_eval_dataset(opt, filenames, height, width):
+    eval_split = str(getattr(opt, "eval_split", "")).lower()
+
+    if eval_split == "c3vd":
+        img_ext = ".png"
+    else:
+        img_ext = ".png" if bool(getattr(opt, "png", False)) else ".jpg"
+
+    dataset_kwargs = {}
+
+    if eval_split == "hamlyn":
+        DatasetClass = datasets.HamlynDataset
+        print("-> Using HamlynDataset for evaluation")
+    elif eval_split == "c3vd":
+        DatasetClass = datasets.C3VDDataset
+        dataset_kwargs["intrinsics_file"] = getattr(opt, "c3vd_intrinsics_file", None)
+        print("-> Using C3VDDataset for evaluation")
+    else:
+        DatasetClass = datasets.SCAREDRAWDataset
+        print(f"-> Using SCAREDRAWDataset for evaluation (eval_split={opt.eval_split})")
+
+    dataset = DatasetClass(
+        opt.data_path,
+        filenames,
+        int(height),
+        int(width),
+        [0],
+        4,
+        is_train=False,
+        img_ext=img_ext,
+        **dataset_kwargs,
+    )
+    return dataset
+
+
+def load_monovit_for_eval(opt):
+    encoder_path = os.path.join(opt.load_weights_folder, "encoder.pth")
+    decoder_path = os.path.join(opt.load_weights_folder, "depth.pth")
+
+    encoder_dict = torch.load(encoder_path, map_location="cpu")
+
+    model_height = int(encoder_dict.get("height", int(getattr(opt, "height", 256))))
+    model_width = int(encoder_dict.get("width", int(getattr(opt, "width", 320))))
+
+    encoder = networks.mpvit_small()
+    encoder.num_ch_enc = [64, 128, 216, 288, 288]
+    depth_decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=range(4))
+
+    model_dict = encoder.state_dict()
+    encoder.load_state_dict({k: v for k, v in encoder_dict.items() if k in model_dict})
+    depth_decoder.load_state_dict(torch.load(decoder_path, map_location="cpu"))
+
+    return encoder, depth_decoder, model_height, model_width
+
+
+def evaluate(opt, global_step=None, log_to_wandb=True, max_log_images=3):
+    """Evaluate a pretrained model against ``gt_depths.npz``."""
+    eval_split = str(getattr(opt, "eval_split", "")).lower()
+    is_c3vd = eval_split == "c3vd" or str(getattr(opt, "dataset", "")).lower() == "c3vd"
+    split_root = getattr(opt, "split_root", None) or splits_dir
+
+    if is_c3vd:
+        min_depth = float(getattr(opt, "c3vd_eval_min_depth", 0.1))
+        max_depth = float(getattr(opt, "c3vd_eval_max_depth", 100.0))
+    else:
+        min_depth = 1e-3
+        max_depth = float(getattr(opt, "max_depth", 150.0))
+
+    assert sum((bool(getattr(opt, "eval_mono", False)), bool(getattr(opt, "eval_stereo", False)))) == 1, \
+        "Choose mono or stereo evaluation: set exactly one of eval_mono/eval_stereo"
+
+    if getattr(opt, "ext_disp_to_eval", None) is not None:
+        print(f"-> Loading predictions from {opt.ext_disp_to_eval}")
+        pred_disps = np.load(opt.ext_disp_to_eval)
+    else:
         opt.load_weights_folder = os.path.expanduser(opt.load_weights_folder)
+        assert os.path.isdir(opt.load_weights_folder), f"Cannot find folder: {opt.load_weights_folder}"
+        print(f"-> Loading weights from {opt.load_weights_folder}")
 
-        assert os.path.isdir(opt.load_weights_folder), \
-            "Cannot find a folder at {}".format(opt.load_weights_folder)
+        custom_list = getattr(opt, "eval_filelist", None)
+        if custom_list is not None:
+            custom_list = os.path.expanduser(custom_list)
+            print(f"-> Using custom eval file list: {custom_list}")
+            filenames = readlines(custom_list)
+        else:
+            split_dir = resolve_split_dir(opt.eval_split, split_root)
+            filenames = readlines(os.path.join(split_dir, "test_files.txt"))
 
-        print("-> Loading weights from {}".format(opt.load_weights_folder))
+        encoder, depth_decoder, model_height, model_width = load_monovit_for_eval(opt)
 
-        filenames = readlines(os.path.join(splits_dir, opt.eval_split, "test_files.txt"))
-        encoder_path = os.path.join(opt.load_weights_folder, "encoder.pth")
-        #encoder_path2 = os.path.join(opt.load_weights_folder, "ii_encoder_depth.pth")
-        decoder_path = os.path.join(opt.load_weights_folder, "depth.pth")
-        
-        encoder_dict = torch.load(encoder_path)
-        HEIGHT, WIDTH = 256, 320
-        #self.opt.height
-        #encoder_dict2 = torch.load(encoder_path2)
-        img_ext = '.png' if opt.png else '.jpg'
-        dataset = datasets.SCAREDRAWDataset(opt.data_path, filenames,
-                                           HEIGHT, WIDTH,
-                                           [0], 4, is_train=False, img_ext=img_ext)
+        dataset = build_eval_dataset(opt, filenames, model_height, model_width)
+        dataloader = DataLoader(
+            dataset,
+            int(getattr(opt, "eval_batch_size", 16)),
+            shuffle=False,
+            num_workers=int(getattr(opt, "num_workers", 4)),
+            pin_memory=True,
+            drop_last=False,
+        )
 
-        
-        dataloader = DataLoader(dataset, 16, shuffle=False, num_workers=opt.num_workers,
-                                pin_memory=True, drop_last=False)
-
-        # encoder = networks.ResnetEncoder(opt.num_layers, False)
-        encoder = mpvit_small()
-        encoder.num_ch_enc = [64, 128, 216, 288, 288]
-        depth_decoder = networks.DepthDecoder(encoder.num_ch_enc, scales=range(4))
-
-        #encoder2 = networks.ResnetEncoder(opt.num_layers, False)
-
-        model_dict = encoder.state_dict()
-        encoder.load_state_dict({k: v for k, v in encoder_dict.items() if k in model_dict})
-        #encoder2.load_state_dict({k: v for k, v in encoder_dict2.items() if k in model_dict})
-        depth_decoder.load_state_dict(torch.load(decoder_path))
-
-        encoder.cuda()
-        encoder.eval()
-        depth_decoder.cuda()
-        depth_decoder.eval()
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() and not bool(getattr(opt, "no_cuda", False)) else "cpu"
+        )
+        encoder.to(device).eval()
+        depth_decoder.to(device).eval()
 
         pred_disps = []
-
-        print("-> Computing predictions with size {}x{}".format(
-            WIDTH, HEIGHT))
+        print(f"-> Computing predictions with size {model_width}x{model_height}")
 
         with torch.no_grad():
             for data in dataloader:
-                input_color = data[("color", 0, 0)].cuda()
-                #print(input_color.shape)
-                if opt.post_process:
-                    # Post-processed results require each image to have two forward passes
+                input_color = data[("color", 0, 0)].to(
+                    device,
+                    non_blocking=(device.type == "cuda"),
+                )
+
+                if bool(getattr(opt, "post_process", False)):
                     input_color = torch.cat((input_color, torch.flip(input_color, [3])), 0)
-                
+
                 features = encoder(input_color)
                 output = depth_decoder(features)
-                
-                pred_disp, _ = disp_to_depth(output[("disp", 0)], opt.min_depth, opt.max_depth)
+
+                pred_disp, _ = disp_to_depth(
+                    output[("disp", 0)],
+                    float(getattr(opt, "min_depth", 1e-3)),
+                    float(getattr(opt, "max_depth", 150.0)),
+                )
                 pred_disp = pred_disp.cpu()[:, 0].numpy()
-
-                """
-                if opt.post_process:
-                    N = pred_disp.shape[0] // 2
-                    pred_disp = batch_post_process_disparity(pred_disp[:N], pred_disp[N:, :, ::-1])"""
-
                 pred_disps.append(pred_disp)
 
-        pred_disps = np.concatenate(pred_disps) 
-        #depth_tensor = torch.Tensor(pred_disps)
-        #median_prediction = torch.median(depth_tensor) 
-        #print(median_prediction)
+        pred_disps = np.concatenate(pred_disps, axis=0)
 
-    else:
-        # Load predictions from fileF
-        print("-> Loading predictions from {}".format(opt.ext_disp_to_eval))
-        pred_disps = np.load(opt.ext_disp_to_eval)
-
-        if opt.eval_eigen_to_benchmark:
-            eigen_to_benchmark_ids = np.load(
-                os.path.join(splits_dir, "benchmark", "eigen_to_benchmark_ids.npy"))
-
-            pred_disps = pred_disps[eigen_to_benchmark_ids]
-
-    if opt.save_pred_disps:
-        output_path = os.path.join(
-            opt.load_weights_folder, "disps_{}_split.npy".format(opt.eval_split))
-        print("-> Saving predicted disparities to ", output_path)
+    if bool(getattr(opt, "save_pred_disps", False)):
+        output_path = os.path.join(opt.load_weights_folder, f"disps_{opt.eval_split}_split.npy")
+        print(f"-> Saving predicted disparities to {output_path}")
         np.save(output_path, pred_disps)
 
-    if opt.no_eval:
+    if bool(getattr(opt, "no_eval", False)):
         print("-> Evaluation disabled. Done.")
-        quit()
-    """
-    elif opt.eval_split == 'benchmark':
-        save_dir = os.path.join(opt.load_weights_folder, "benchmark_predictions")
-        print("-> Saving out benchmark predictions to {}".format(save_dir))
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
+        return {}
 
-        for idx in range(len(pred_disps)):
-            disp_resized = cv2.resize(pred_disps[idx], (1216, 352))
-            depth = STEREO_SCALE_FACTOR / disp_resized
-            depth = np.clip(depth, 0, 80)
-            depth = np.uint16(depth * 256)
-            save_path = os.path.join(save_dir, "{:010d}.png".format(idx))
-            cv2.imwrite(save_path, depth)
+    custom_gt = getattr(opt, "gt_depths_path", None)
+    if custom_gt is not None:
+        gt_path = os.path.expanduser(custom_gt)
+        print(f"-> Using custom gt_depths.npz: {gt_path}")
+    else:
+        split_dir = resolve_split_dir(opt.eval_split, split_root)
+        gt_path = os.path.join(split_dir, "gt_depths.npz")
+    if not os.path.exists(gt_path):
+        raise FileNotFoundError(f"gt_depths.npz not found: {gt_path}")
 
-        print("-> No ground truth is available for the KITTI benchmark, so not evaluating. Done.")
-        quit()"""
+    data_npz = np.load(gt_path, fix_imports=True, encoding="latin1", allow_pickle=True)
+    gt_depths = data_npz["data"]
+    if isinstance(gt_depths, np.ndarray) and gt_depths.dtype == object:
+        gt_depths = list(gt_depths)
 
-    gt_path = os.path.join(splits_dir, opt.eval_split, "gt_depths.npz")
-    gt_depths = np.load(gt_path, fix_imports=True, encoding='latin1')["data"]
+    num_pred = pred_disps.shape[0]
+    num_gt = len(gt_depths)
+    assert num_pred == num_gt, f"Mismatch: {num_pred} predictions vs {num_gt} gt depth maps"
 
-    print("-> Evaluating")
-
-    if opt.eval_stereo:
-        print("   Stereo evaluation - "
-              "disabling median scaling, scaling by {}".format(STEREO_SCALE_FACTOR))
-        opt.disable_median_scaling = True
-        opt.pred_depth_scale_factor = STEREO_SCALE_FACTOR
+    if bool(getattr(opt, "eval_stereo", False)):
+        print(f"   Stereo evaluation - scaling by {STEREO_SCALE_FACTOR}")
+        disable_median_scaling = True
+        pred_depth_scale_factor = STEREO_SCALE_FACTOR
     else:
         print("   Mono evaluation - using median scaling")
+        disable_median_scaling = bool(getattr(opt, "disable_median_scaling", False))
+        pred_depth_scale_factor = float(getattr(opt, "pred_depth_scale_factor", 1.0))
 
     errors = []
     ratios = []
 
-    for i in range(pred_disps.shape[0]):
+    can_wandb = log_to_wandb and (wandb is not None) and (wandb.run is not None)
+    log_images = max(0, int(max_log_images))
 
-        gt_depth = gt_depths[i] 
-        
-       
+    for i in range(num_pred):
+        gt_depth = np.asarray(gt_depths[i], dtype=np.float32)
         gt_height, gt_width = gt_depth.shape[:2]
+
         pred_disp = pred_disps[i]
-        disp = colormap(pred_disp)
-        wandb.log({"disp_testing": wandb.Image(disp.transpose(1, 2, 0))},step=i)
-        pred_disp = cv2.resize(pred_disp, (gt_width, gt_height))
-        pred_depth = 1/pred_disp
-        """
-        if opt.eval_split == "eigen":
-            mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
+        pred_disp_resized = resize_2d(pred_disp, gt_width, gt_height)
 
-            crop = np.array([0.40810811 * gt_height, 0.99189189 * gt_height,
-                             0.03594771 * gt_width,  0.96405229 * gt_width]).astype(np.int32)
-            crop_mask = np.zeros(mask.shape)
-            crop_mask[crop[0]:crop[1], crop[2]:crop[3]] = 1
-            mask = np.logical_and(mask, crop_mask)
+        pred_depth = 1.0 / np.maximum(pred_disp_resized, 1e-6)
+        mask = np.logical_and(gt_depth > min_depth, gt_depth < max_depth)
 
-        else:"""
-        
-        mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
+        pred_depth = pred_depth[mask] * pred_depth_scale_factor
+        gt = gt_depth[mask]
 
-        pred_depth = pred_depth[mask]
-        gt_depth = gt_depth[mask]
-        #print(opt.pred_depth_scale_factor)
-        #pred_depth *= opt.pred_depth_scale_factor 
-        #pred_depth *= 1
-        
-        if not opt.disable_median_scaling:
-            ratio = np.median(gt_depth) / np.median(pred_depth)
+        if gt.size == 0:
+            continue
+
+        if not disable_median_scaling:
+            ratio = np.median(gt) / np.median(pred_depth)
             ratios.append(ratio)
             pred_depth *= ratio
-        
-        pred_depth[pred_depth < MIN_DEPTH] = MIN_DEPTH
-        pred_depth[pred_depth > MAX_DEPTH] = MAX_DEPTH
-        #print(gt_depth.shape,",",pred_depth.shape)
-        errors.append(compute_errors(gt_depth, pred_depth))
-    if not opt.disable_median_scaling:
+
+        pred_depth = np.clip(pred_depth, min_depth, max_depth)
+        errors.append(compute_errors(gt, pred_depth))
+
+        if can_wandb and i < log_images:
+            disp_vis = colormap(pred_disp_resized)
+            wandb.log(
+                {f"eval/disp_example_{i}": wandb.Image(disp_vis.transpose(1, 2, 0))},
+                step=global_step if global_step is not None else i,
+            )
+
+    if (not disable_median_scaling) and len(ratios) > 0:
         ratios = np.array(ratios)
         med = np.median(ratios)
-        print(" Scaling ratios | med: {:0.3f} | std: {:0.3f}".format(med, np.std(ratios / med)))
+        print(f" Scaling ratios | med: {med:0.3f} | std: {np.std(ratios / med):0.3f}")
+
+    if len(errors) == 0:
+        raise RuntimeError(
+            "No valid depth samples were available after masking. "
+            f"Mask range was ({min_depth}, {max_depth})."
+        )
 
     mean_errors = np.array(errors).mean(0)
 
+    metrics = {
+        "abs_rel": float(mean_errors[0]),
+        "sq_rel": float(mean_errors[1]),
+        "rmse": float(mean_errors[2]),
+        "rmse_log": float(mean_errors[3]),
+        "a1": float(mean_errors[4]),
+        "a2": float(mean_errors[5]),
+        "a3": float(mean_errors[6]),
+    }
+
     print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
     print(("&{: 8.3f}  " * 7).format(*mean_errors.tolist()) + "\\\\")
-    print("\n-> Done!")
+    print("-> Done!")
 
-def colormap(inputs, normalize=True, torch_transpose=True):
-        if isinstance(inputs, torch.Tensor):
-            inputs = inputs.detach().cpu().numpy()
+    return metrics
 
-        vis = inputs
-        if normalize:
-            ma = float(vis.max())
-            mi = float(vis.min())
-            d = ma - mi if ma != mi else 1e5
-            vis = (vis - mi) / d
-
-        if vis.ndim == 4:
-            vis = vis.transpose([0, 2, 3, 1])
-            vis = _DEPTH_COLORMAP(vis)
-            vis = vis[:, :, :, 0, :3]
-            if torch_transpose:
-                vis = vis.transpose(0, 3, 1, 2)
-        elif vis.ndim == 3:
-            vis = _DEPTH_COLORMAP(vis)
-            vis = vis[:, :, :, :3]
-            if torch_transpose:
-                vis = vis.transpose(0, 3, 1, 2)
-        elif vis.ndim == 2:
-            vis = _DEPTH_COLORMAP(vis)
-            vis = vis[..., :3]
-            if torch_transpose:
-                vis = vis.transpose(2, 0, 1)
-
-        return vis
 
 if __name__ == "__main__":
     options = MonodepthOptions()

@@ -41,14 +41,18 @@ from layers import (
     BackprojectDepth,
     Project3D,
     disp_to_depth,
+    compute_depth_errors,
     get_smooth_loss,
     transformation_from_parameters,
 )
-from utils import readlines, sec_to_hm_str
+from utils import readlines, sec_to_hm_str, resolve_split_dir
 
 import datasets
 import networks
-import wandb
+try:
+    import wandb
+except Exception:
+    wandb = None
 
 
 class Trainer:
@@ -164,13 +168,13 @@ class Trainer:
         # ------------------------------------------------------------------
         # Datasets and dataloaders
         # ------------------------------------------------------------------
-        # Define dataset mapping. Include 'hamlyn' for HamlynDataset support.
-        # Hamlyn dataset is used for endoscopy or Hamlyn-specific depth data.
         datasets_dict = {
-            "kitti": datasets.KITTIRAWDataset,
-            "kitti_odom": datasets.KITTIOdomDataset,
+            "kitti": getattr(datasets, "KITTIRAWDataset", None),
+            "kitti_odom": getattr(datasets, "KITTIOdomDataset", None),
+            "kitti_depth": getattr(datasets, "KITTIDepthDataset", None),
             "endovis": datasets.SCAREDDataset,
             "hamlyn": datasets.HamlynDataset if hasattr(datasets, "HamlynDataset") else None,
+            "c3vd": datasets.C3VDDataset if hasattr(datasets, "C3VDDataset") else None,
         }
         if self.opt.dataset not in datasets_dict or datasets_dict[self.opt.dataset] is None:
             raise KeyError(
@@ -179,16 +183,78 @@ class Trainer:
             )
         self.dataset = datasets_dict[self.opt.dataset]
 
-        fpath = os.path.join(
-            os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt"
-        )
-        train_filenames = readlines(fpath.format("train"))
-        val_filenames = readlines(fpath.format("val"))
-        img_ext = ".png" if self.opt.png else ".jpg"
+        splits_base = getattr(self.opt, "split_root", None)
+        if not splits_base:
+            splits_base = os.path.join(os.path.dirname(__file__), "splits")
+        split_dir = resolve_split_dir(self.opt.split, splits_base)
+        fpath = os.path.join(split_dir, "{}_files.txt")
+
+        train_path = fpath.format("train")
+        val_path = fpath.format("val")
+        test_path = fpath.format("test")
+
+        train_filenames = readlines(train_path)
+        if os.path.exists(val_path):
+            val_filenames = readlines(val_path)
+        elif os.path.exists(test_path):
+            print(f"[split] WARNING: {val_path} not found. Using {test_path} as validation.")
+            val_filenames = readlines(test_path)
+        else:
+            print(f"[split] WARNING: {val_path} and {test_path} not found. Splitting train into train/val.")
+            all_train = train_filenames
+            n_val = max(1, int(0.05 * len(all_train)))
+            val_filenames = all_train[:n_val]
+            train_filenames = all_train[n_val:]
+
+        if self.opt.dataset == "c3vd":
+            # C3VD data is distributed as PNG sequences.
+            img_ext = ".png"
+        else:
+            img_ext = ".png" if self.opt.png else ".jpg"
+
+        dataset_kwargs = {}
+        if self.opt.dataset == "c3vd":
+            dataset_kwargs["intrinsics_file"] = getattr(self.opt, "c3vd_intrinsics_file", None)
 
         num_train_samples = len(train_filenames)
         self.num_total_steps = (
             num_train_samples // self.opt.batch_size * self.opt.num_epochs
+        )
+
+        # Docker/containers can have a very small /dev/shm; too many workers
+        # often crash with "bus error". Auto-cap workers in low-shm setups.
+        requested_workers = int(getattr(self.opt, "num_workers", 12))
+        self.loader_num_workers = requested_workers
+        self.loader_pin_memory = (self.device.type == "cuda")
+        shm_gb = None
+
+        if requested_workers > 0 and os.name != "nt":
+            try:
+                shm_stat = os.statvfs("/dev/shm")
+                shm_bytes = int(shm_stat.f_frsize * shm_stat.f_bavail)
+                shm_gb = shm_bytes / float(1024 ** 3)
+
+                if shm_bytes < 512 * 1024 ** 2:
+                    self.loader_num_workers = 0
+                elif shm_bytes < 2 * 1024 ** 3 and requested_workers > 2:
+                    self.loader_num_workers = 2
+            except Exception:
+                pass
+
+        if self.loader_num_workers == 0:
+            self.loader_pin_memory = False
+
+        if self.loader_num_workers != requested_workers:
+            shm_msg = f"{shm_gb:.2f} GB" if shm_gb is not None else "unknown"
+            print(
+                "[dataloader] Low shared memory detected "
+                f"(/dev/shm ~= {shm_msg}). "
+                f"Auto-adjusting num_workers: {requested_workers} -> {self.loader_num_workers}"
+            )
+
+        print(
+            f"[dataloader] num_workers={self.loader_num_workers}, "
+            f"pin_memory={self.loader_pin_memory}"
         )
 
         train_dataset = self.dataset(
@@ -200,14 +266,7 @@ class Trainer:
             4,
             is_train=True,
             img_ext=img_ext,
-        )
-        self.train_loader = DataLoader(
-            train_dataset,
-            self.opt.batch_size,
-            True,
-            num_workers=self.opt.num_workers,
-            pin_memory=True,
-            drop_last=True,
+            **dataset_kwargs,
         )
         val_dataset = self.dataset(
             self.opt.data_path,
@@ -218,13 +277,30 @@ class Trainer:
             4,
             is_train=False,
             img_ext=img_ext,
+            **dataset_kwargs,
+        )
+
+        # Hamlyn strict neighbor snapping (ENDO-DAC-like)
+        if self.opt.dataset == "hamlyn" and getattr(self.opt, "hamlyn_strict_neighbors", False):
+            train_dataset.strict_neighbors = True
+            train_dataset.neighbor_search_max = int(getattr(self.opt, "neighbor_search_max", 10))
+            val_dataset.strict_neighbors = True
+            val_dataset.neighbor_search_max = int(getattr(self.opt, "neighbor_search_max", 10))
+
+        self.train_loader = DataLoader(
+            train_dataset,
+            self.opt.batch_size,
+            True,
+            num_workers=self.loader_num_workers,
+            pin_memory=self.loader_pin_memory,
+            drop_last=True,
         )
         self.val_loader = DataLoader(
             val_dataset,
             self.opt.batch_size,
             False,
-            num_workers=self.opt.num_workers,
-            pin_memory=True,
+            num_workers=self.loader_num_workers,
+            pin_memory=self.loader_pin_memory,
             drop_last=True,
         )
         self.val_iter = iter(self.val_loader)
@@ -584,7 +660,7 @@ class Trainer:
         depth_pred = depth_pred[mask]
         depth_pred = depth_pred * (torch.median(depth_gt) / torch.median(depth_pred))
         depth_pred = torch.clamp(depth_pred, min=1e-3, max=80)
-        depth_errors = utils.compute_depth_errors(depth_gt, depth_pred)
+        depth_errors = compute_depth_errors(depth_gt, depth_pred)
         for i, name in enumerate(self.depth_metric_names):
             losses[name] = float(depth_errors[i].cpu())
 
@@ -604,6 +680,8 @@ class Trainer:
         )
 
     def log(self, mode, inputs, outputs, losses):
+        if wandb is None or wandb.run is None:
+            return
         # Prepare data for wandb logging
         log_data = {f"{mode}{k}": float(v.detach().cpu()) if torch.is_tensor(v) else float(v)
                     for k, v in losses.items()}

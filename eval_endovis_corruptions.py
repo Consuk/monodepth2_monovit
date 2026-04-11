@@ -96,7 +96,7 @@ def load_model(load_weights_folder, device, opt):
     return encoder, depth_decoder, height, width
 
 
-def build_dataset(dataset_name, data_path_root, filenames, height, width, png=False):
+def build_dataset(dataset_name, data_path_root, filenames, height, width, png=False, c3vd_intrinsics_file=None):
     """
     Construye el dataset correcto según el nombre indicado.
     """
@@ -126,6 +126,19 @@ def build_dataset(dataset_name, data_path_root, filenames, height, width, png=Fa
             img_ext=img_ext,
         )
 
+    if dataset_name.lower() == "c3vd":
+        return datasets.C3VDDataset(
+            data_path_root,
+            filenames,
+            height,
+            width,
+            [0],
+            4,
+            is_train=False,
+            img_ext=".png",
+            intrinsics_file=c3vd_intrinsics_file,
+        )
+
     raise ValueError(f"Dataset no soportado: {dataset_name}")
 
 
@@ -147,11 +160,20 @@ def evaluate_one_root(
     max_depth=150.0,
     device="cuda",
     debug=False,
+    c3vd_intrinsics_file=None,
 ):
     """
     Evalúa una raíz concreta.
     """
-    dataset = build_dataset(dataset_name, data_path_root, filenames, height, width, png=png)
+    dataset = build_dataset(
+        dataset_name,
+        data_path_root,
+        filenames,
+        height,
+        width,
+        png=png,
+        c3vd_intrinsics_file=c3vd_intrinsics_file,
+    )
 
     debug_print(debug, f"[DEBUG] dataset_name = {dataset_name}")
     debug_print(debug, f"[DEBUG] data_path_root = {data_path_root}")

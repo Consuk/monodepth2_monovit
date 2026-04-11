@@ -19,6 +19,21 @@ def readlines(filename):
     return lines
 
 
+def resolve_split_dir(split_name, base_dir=None):
+    """Resolve split directory with fallback to ``<base_dir>/endovis/<split_name>``."""
+    if base_dir is None:
+        base_dir = os.path.join(os.path.dirname(__file__), "splits")
+
+    primary = os.path.join(base_dir, split_name)
+    fallback = os.path.join(base_dir, "endovis", split_name)
+
+    if os.path.isdir(primary):
+        return primary
+    if os.path.isdir(fallback):
+        return fallback
+    return primary
+
+
 def normalize_image(x):
     """Rescale image pixels to span range [0, 1]
     """

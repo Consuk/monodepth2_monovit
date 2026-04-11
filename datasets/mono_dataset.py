@@ -114,8 +114,8 @@ class MonoDataset(data.Dataset):
 
     def __getitem__(self, index):
         inputs = {}
-        do_flip = False
-        do_color_aug = False
+        do_flip = self.is_train and random.random() > 0.5
+        do_color_aug = self.is_train and random.random() > 0.5
 
         folder, frame_index, side = self.index_to_folder_and_frame_idx(index)
 
@@ -154,8 +154,11 @@ class MonoDataset(data.Dataset):
             inputs[("inv_K", scale)] = torch.from_numpy(inv_K)
 
         # Apply data augmentation (if any)
-        color_aug = (lambda x: x) if not do_color_aug else transforms.ColorJitter(
-            self.brightness, self.contrast, self.saturation, self.hue)
+        if do_color_aug:
+            color_aug = transforms.ColorJitter(
+                self.brightness, self.contrast, self.saturation, self.hue)
+        else:
+            color_aug = (lambda x: x)
         self.preprocess(inputs, color_aug)
 
         # Remove original PIL images to save memory
