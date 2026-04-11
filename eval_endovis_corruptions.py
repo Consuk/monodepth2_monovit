@@ -413,8 +413,10 @@ def main():
     parser.add_argument("--split", type=str, default="hamlyn",
                         help="Nombre del split dentro de splits/")
     parser.add_argument("--dataset", type=str, default="hamlyn",
-                        choices=["hamlyn", "endovis", "scared"],
+                        choices=["hamlyn", "endovis", "scared", "c3vd"],
                         help="Dataset a usar para construir el loader")
+    parser.add_argument("--c3vd_intrinsics_file", type=str, default=None,
+                        help="Ruta opcional de intrínsecos para C3VD")
     parser.add_argument("--data_subdir", type=str, default="",
                         help="Subcarpeta dentro de severity_X para datasets no-Hamlyn")
 
@@ -450,6 +452,12 @@ def main():
                         help="Scales del decoder de MonoViT")
 
     args = parser.parse_args()
+
+    if args.dataset.lower() == "c3vd":
+        if args.min_depth == 1.0:
+            args.min_depth = 0.1
+        if args.max_depth == 50.0:
+            args.max_depth = 100.0
 
     cv2.setNumThreads(0)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -556,6 +564,7 @@ def main():
                     max_depth=args.max_depth,
                     device=device,
                     debug=this_debug,
+                    c3vd_intrinsics_file=args.c3vd_intrinsics_file,
                 )
 
                 abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3 = mean_errors.tolist()
