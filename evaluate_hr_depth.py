@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 import datasets
 import networks
 from layers import disp_to_depth
-from utils import readlines
+from utils import readlines, resolve_split_dir
 from options import MonodepthOptions
 
 cv2.setNumThreads(0)
@@ -44,21 +44,36 @@ def compute_errors(gt, pred):
 
 
 def build_eval_dataset(opt, filenames, height, width):
-    img_ext = ".png" if bool(getattr(opt, "png", False)) else ".jpg"
+    eval_split = str(getattr(opt, "eval_split", "")).lower()
+    dataset_name = str(getattr(opt, "dataset", "")).lower()
+    is_c3vd = eval_split == "c3vd" or dataset_name == "c3vd"
 
-    dataset_dict = {
-        "endovis": getattr(datasets, "EndovisDataset", None),
-        "hamlyn": getattr(datasets, "HamlynDataset", None),
-        "kitti": getattr(datasets, "KITTIRAWDataset", None),
-        "kitti_depth": getattr(datasets, "KITTIDepthDataset", None),
-        "kitti_test": getattr(datasets, "KITTITestDataset", None),
-        "kitti_odom": getattr(datasets, "KITTIOdomDataset", None),
-    }
+    if is_c3vd:
+        img_ext = ".png"
+    else:
+        img_ext = ".png" if bool(getattr(opt, "png", False)) else ".jpg"
 
-    if opt.dataset not in dataset_dict or dataset_dict[opt.dataset] is None:
+    dataset_kwargs = {}
+    if is_c3vd:
+        DatasetClass = getattr(datasets, "C3VDDataset", None)
+        dataset_kwargs["intrinsics_file"] = getattr(opt, "c3vd_intrinsics_file", None)
+    elif eval_split == "hamlyn" or dataset_name == "hamlyn":
+        DatasetClass = getattr(datasets, "HamlynDataset", None)
+        dataset_kwargs["strict_neighbors"] = getattr(opt, "hamlyn_strict_neighbors", False)
+        dataset_kwargs["neighbor_search_max"] = getattr(opt, "neighbor_search_max", 10)
+    elif eval_split in ("endovis", "serv-ct") or dataset_name in ("endovis", "scared"):
+        DatasetClass = getattr(datasets, "SCAREDRAWDataset", None)
+    elif dataset_name == "kitti":
+        DatasetClass = getattr(datasets, "KITTIRAWDataset", None)
+    elif dataset_name == "kitti_depth":
+        DatasetClass = getattr(datasets, "KITTIDepthDataset", None)
+    elif dataset_name == "kitti_odom":
+        DatasetClass = getattr(datasets, "KITTIOdomDataset", None)
+    else:
+        DatasetClass = None
+
+    if DatasetClass is None:
         raise KeyError(f"Dataset '{opt.dataset}' is not available in datasets package")
-
-    DatasetClass = dataset_dict[opt.dataset]
 
     dataset = DatasetClass(
         opt.data_path,
@@ -69,8 +84,7 @@ def build_eval_dataset(opt, filenames, height, width):
         4,
         is_train=False,
         img_ext=img_ext,
-        strict_neighbors=getattr(opt, "hamlyn_strict_neighbors", False),
-        neighbor_search_max=getattr(opt, "neighbor_search_max", 10)
+        **dataset_kwargs,
     )
     return dataset
 
@@ -82,6 +96,9 @@ def evaluate(opt):
         "Choose mono or stereo evaluation: set exactly one of eval_mono/eval_stereo"
 
     device = torch.device("cpu" if opt.no_cuda else "cuda")
+    split_root = getattr(opt, "split_root", None) or splits_dir
+    eval_split = str(getattr(opt, "eval_split", "")).lower()
+    is_c3vd = eval_split == "c3vd" or str(getattr(opt, "dataset", "")).lower() == "c3vd"
     opt.load_weights_folder = os.path.expanduser(opt.load_weights_folder)
 
     if not os.path.isdir(opt.load_weights_folder):
@@ -130,7 +147,8 @@ def evaluate(opt):
         print(f"-> Using custom eval file list: {custom_list}")
         filenames = readlines(custom_list)
     else:
-        split_file = os.path.join(splits_dir, opt.eval_split, "test_files.txt")
+        split_dir = resolve_split_dir(opt.eval_split, split_root)
+        split_file = os.path.join(split_dir, "test_files.txt")
         if not os.path.isfile(split_file):
             raise FileNotFoundError(f"Cannot find split file: {split_file}")
         filenames = readlines(split_file)
@@ -214,7 +232,8 @@ def evaluate(opt):
         gt_path = os.path.expanduser(custom_gt)
         print(f"-> Using custom gt_depths.npz: {gt_path}")
     else:
-        gt_path = os.path.join(splits_dir, opt.eval_split, "gt_depths.npz")
+        split_dir = resolve_split_dir(opt.eval_split, split_root)
+        gt_path = os.path.join(split_dir, "gt_depths.npz")
 
     if not os.path.exists(gt_path):
         raise FileNotFoundError(f"gt_depths.npz not found: {gt_path}")
@@ -229,8 +248,12 @@ def evaluate(opt):
     num_gt = len(gt_depths)
     assert num_pred == num_gt, f"Mismatch: {num_pred} predictions vs {num_gt} gt depth maps"
 
-    MIN_DEPTH = float(getattr(opt, "min_depth", 1e-3))
-    MAX_DEPTH = float(getattr(opt, "max_depth", 150.0))
+    if is_c3vd:
+        MIN_DEPTH = float(getattr(opt, "c3vd_eval_min_depth", 0.1))
+        MAX_DEPTH = float(getattr(opt, "c3vd_eval_max_depth", 100.0))
+    else:
+        MIN_DEPTH = float(getattr(opt, "min_depth", 1e-3))
+        MAX_DEPTH = float(getattr(opt, "max_depth", 150.0))
 
     if bool(getattr(opt, "eval_stereo", False)):
         print(f"   Stereo evaluation - scaling by {STEREO_SCALE_FACTOR}")
