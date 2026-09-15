@@ -85,9 +85,7 @@ def describe_tensor(x, name="tensor"):
 
 
 def load_model(load_weights_folder, device, opt):
-    """
-    Carga MonoViT exactamente como en evaluate_hr_depth.py
-    """
+    """Load the encoder and decoder matching the saved checkpoint."""
     print(f"-> Cargando modelo MonoViT desde: {load_weights_folder}")
 
     encoder_path = os.path.join(load_weights_folder, "encoder.pth")
@@ -112,20 +110,37 @@ def load_model(load_weights_folder, device, opt):
     model_dict = encoder.state_dict()
     filtered_encoder_dict = {
         k: v for k, v in encoder_dict.items()
-        if k in model_dict
+        if k in model_dict and hasattr(v, "shape") and v.shape == model_dict[k].shape
     }
+    if len(filtered_encoder_dict) < 0.9 * len(model_dict):
+        raise RuntimeError(
+            "El checkpoint del encoder no coincide con MPViT: "
+            f"{len(filtered_encoder_dict)}/{len(model_dict)} tensores compatibles"
+        )
     model_dict.update(filtered_encoder_dict)
     encoder.load_state_dict(model_dict)
 
-    # ===== Decoder MonoViT =====
-    depth_decoder = networks.DepthDecoder(
-        encoder.num_ch_enc,
-        scales=opt.scales
-    )
-    depth_decoder = depth_decoder.to(device)
-
+    # Select the decoder that matches the saved run. Both variants exist in
+    # this repository because different training runs used different decoders.
     decoder_dict = torch.load(decoder_path, map_location=device)
-    depth_decoder.load_state_dict(decoder_dict)
+    decoder_candidates = [
+        ("DepthDecoder", networks.DepthDecoder(encoder.num_ch_enc, scales=opt.scales)),
+        ("DepthDecoderT", networks.DepthDecoderT()),
+    ]
+    decoder_errors = []
+    for decoder_name, candidate in decoder_candidates:
+        try:
+            candidate.load_state_dict(decoder_dict)
+            depth_decoder = candidate.to(device)
+            print(f"-> Decodificador seleccionado: {decoder_name}")
+            break
+        except RuntimeError as exc:
+            decoder_errors.append(f"{decoder_name}: {exc}")
+    else:
+        raise RuntimeError(
+            "El checkpoint depth.pth no coincide con DepthDecoder ni DepthDecoderT.\n"
+            + "\n".join(decoder_errors)
+        )
 
     encoder.eval()
     depth_decoder.eval()
