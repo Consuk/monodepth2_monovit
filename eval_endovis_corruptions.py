@@ -125,6 +125,14 @@ def load_model(load_weights_folder, device, opt):
     decoder_dict = torch.load(decoder_path, map_location=device)
     decoder_candidates = [
         ("DepthDecoder", networks.DepthDecoder(encoder.num_ch_enc, scales=opt.scales)),
+        (
+            "LegacyMonoViTDepthDecoder",
+            networks.DepthDecoder(
+                encoder.num_ch_enc,
+                scales=opt.scales,
+                num_ch_dec=[64, 128, 216, 288, 288],
+            ),
+        ),
         ("DepthDecoderT", networks.DepthDecoderT()),
     ]
     decoder_errors = []
@@ -138,7 +146,7 @@ def load_model(load_weights_folder, device, opt):
             decoder_errors.append(f"{decoder_name}: {exc}")
     else:
         raise RuntimeError(
-            "El checkpoint depth.pth no coincide con DepthDecoder ni DepthDecoderT.\n"
+            "El checkpoint depth.pth no coincide con ningún decoder compatible.\n"
             + "\n".join(decoder_errors)
         )
 

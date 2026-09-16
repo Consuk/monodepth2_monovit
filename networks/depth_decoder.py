@@ -45,7 +45,14 @@ class DepthDecoder(nn.Module):
         decoder.  Skips are strongly recommended for best performance.
     """
 
-    def __init__(self, num_ch_enc, scales=range(4), num_output_channels=1, use_skips=True):
+    def __init__(
+        self,
+        num_ch_enc,
+        scales=range(4),
+        num_output_channels=1,
+        use_skips=True,
+        num_ch_dec=None,
+    ):
         super().__init__()
 
         self.num_output_channels = num_output_channels
@@ -61,8 +68,13 @@ class DepthDecoder(nn.Module):
 
         # Channel sizes for decoder layers (from smallest to largest scale).
         # These values follow the original monodepth2 implementation.
-        self.num_ch_dec = np.array([16, 32, 64, 128, 256])
-        # self.num_ch_dec = np.array([64, 128, 216, 288, 288])
+        self.num_ch_dec = np.array(
+            [16, 32, 64, 128, 256] if num_ch_dec is None else num_ch_dec
+        )
+        if len(self.num_ch_dec) != 5:
+            raise ValueError(
+                f"DepthDecoder expects 5 decoder channel values, got {len(self.num_ch_dec)}"
+            )
 
         # Build convolutional blocks for upsampling and feature fusion
         self.convs = OrderedDict()
